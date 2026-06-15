@@ -132,6 +132,21 @@ console.log('Skip provisioning:', SKIP)
 console.log('\n── Creating branch ──────────────────────────────────────────────\n')
 run('git checkout -b bootstrap/init')
 
+// Write .gitignore immediately after branch creation, before any other files.
+// This guarantees `git add .` never picks up ignored files (e.g. terraform.tfvars)
+// regardless of the order in which subsequent files are written.
+file('.gitignore', [
+  'node_modules/', 'dist/', '.env', '*.pem', '*.key',
+  '.turbo/', 'coverage/', 'drizzle/', '.ai-artifacts/',
+  ...(CLOUD === 'gcp' ? [
+    'infra/gcp/dev/terraform.tfvars',
+    'infra/gcp/dev/.terraform/',
+    'infra/gcp/dev/*.tfstate',
+    'infra/gcp/dev/*.tfstate.backup',
+  ] : []),
+  '',
+].join('\n'))
+
 // ── 3. Templates from workflow repo ───────────────────────────────────────────
 
 console.log('\n── Copying templates ────────────────────────────────────────────\n')
@@ -155,18 +170,6 @@ if (CLOUD === 'azure') {
 // ── 4. Static project files ───────────────────────────────────────────────────
 
 console.log('\n── Project root files ───────────────────────────────────────────\n')
-
-file('.gitignore', [
-  'node_modules/', 'dist/', '.env', '*.pem', '*.key',
-  '.turbo/', 'coverage/', 'drizzle/', '.ai-artifacts/',
-  ...(CLOUD === 'gcp' ? [
-    'infra/gcp/dev/terraform.tfvars',
-    'infra/gcp/dev/.terraform/',
-    'infra/gcp/dev/*.tfstate',
-    'infra/gcp/dev/*.tfstate.backup',
-  ] : []),
-  '',
-].join('\n'))
 
 file('.env.example', [
   '# Copy to .env. Never commit .env.',
