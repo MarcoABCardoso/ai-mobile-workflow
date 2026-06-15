@@ -73,6 +73,7 @@ resource "google_project_service" "apis" {
     "artifactregistry.googleapis.com",
     "iam.googleapis.com",
     "firebase.googleapis.com",
+    "identityplatform.googleapis.com",  # required for Firebase Authentication
   ])
   service            = each.value
   disable_on_destroy = false
@@ -83,18 +84,24 @@ resource "google_project_service" "apis" {
 resource "google_service_account" "app" {
   account_id   = local.sa_id
   display_name = "${var.project_name} dev runtime"
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_project_iam_member" "secret_accessor" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${google_service_account.app.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_project_iam_member" "ar_reader" {
   project = var.project_id
   role    = "roles/artifactregistry.reader"
   member  = "serviceAccount:${google_service_account.app.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 # ─── Secret Manager (secrets store) ─────────────────────────────────────────────

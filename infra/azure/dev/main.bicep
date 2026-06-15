@@ -117,6 +117,10 @@ resource appsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
         customerId: logAnalytics.properties.customerId
+        // listKeys() is evaluated at deploy time and stored in plain text in ARM
+        // deployment history — accessible to anyone with read access to the RG.
+        // Acceptable for dev; production should use Diagnostic Settings with managed
+        // identity to avoid embedding the workspace key in deployment records.
         sharedKey: logAnalytics.listKeys().primarySharedKey
       }
     }

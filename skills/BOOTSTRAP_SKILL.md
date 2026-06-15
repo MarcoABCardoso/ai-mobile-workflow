@@ -115,7 +115,7 @@ Generate the following structure. All files are templates — fill in `<project_
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml              ← lint, test, build on every PR
-│       └── deploy-staging.yml  ← deploy on merge to main
+│       └── deploy-prod.yml     ← deploy to production on merge to main
 ├── CLAUDE.md                   ← project-level AI instructions (see template below)
 ├── turbo.json
 ├── package.json                ← workspace root with workspaces glob
@@ -187,8 +187,8 @@ RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 # Terraform
 RUN apt-get install -y terraform
 
-# Expo + Playwright
-RUN npm install -g expo-cli && \
+# Expo + Playwright + Firebase CLI
+RUN npm install -g expo-cli firebase-tools && \
     npx playwright install --with-deps chromium
 
 # Android SDK + emulator
@@ -340,6 +340,7 @@ Apply IaC for dev baseline only. Do not provision staging or prod.
 RESOURCE_GROUP="<project_name>-dev-rg"
 az group create --name "$RESOURCE_GROUP" --location "<region>"
 az deployment group create \
+  --name main \
   --resource-group "$RESOURCE_GROUP" \
   --template-file infra/azure/dev/main.bicep \
   --parameters infra/azure/dev/main.bicepparam
@@ -374,6 +375,9 @@ CLOUD_RUN_URL=$(terraform output -raw cloud_run_url)
 **Azure — Azure AD B2C:**
 
 ```bash
+# 0. Capture the current subscription ID (needed for resource ID paths below)
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
 # 1. Create a B2C tenant (requires Contributor on the subscription)
 #    B2C is a separate tenant type; it cannot be created via Bicep.
 az resource create \
@@ -395,7 +399,7 @@ az resource create \
 
 # 2. Record the B2C tenant ID (from the response or portal)
 B2C_TENANT_ID=$(az resource show \
-  --ids "/subscriptions/<subscription_id>/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.AzureActiveDirectory/b2cDirectories/<project_name>b2c.onmicrosoft.com" \
+  --ids "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.AzureActiveDirectory/b2cDirectories/<project_name>b2c.onmicrosoft.com" \
   --query properties.tenantId -o tsv)
 
 # 3. Switch to the B2C tenant and register the API application
@@ -403,7 +407,7 @@ az login --tenant "$B2C_TENANT_ID" --allow-no-subscriptions
 
 APP_CLIENT_ID=$(az ad app create \
   --display-name "<project_name>-api" \
-  --sign-in-audience AzureADandPersonalMicrosoftAccount \
+  --sign-in-audience AzureADMyOrg \
   --query appId -o tsv)
 
 # 4. Store credentials in Key Vault (switch back to main tenant first)

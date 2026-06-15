@@ -22,7 +22,7 @@ env:
   PROJECT_NAME: "{{project_name}}"
   REGISTRY: "{{registry_url}}"   # e.g. myapp.azurecr.io or gcr.io/my-project
   # Azure:
-  AZURE_RESOURCE_GROUP: "{{project_name}}-rg"
+  AZURE_RESOURCE_GROUP: "{{project_name}}-prod-rg"
   # GCP (alternative):
   # GCP_PROJECT_ID: "{{project_name}}"
   # GCP_REGION: "{{region}}"

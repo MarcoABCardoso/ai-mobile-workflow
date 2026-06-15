@@ -248,8 +248,12 @@ ios-preview:
 After the PR is raised (Step 7), poll for the run and download all artifacts:
 
 ```bash
-# Get the run ID for this branch
-RUN_ID=$(gh run list --branch feature/<slug> --json databaseId --jq '.[0].databaseId')
+# Pin to the current commit so we don't accidentally watch a stale prior run
+COMMIT_SHA=$(git rev-parse HEAD)
+RUN_ID=$(gh run list \
+  --branch feature/<slug> \
+  --commit "$COMMIT_SHA" \
+  --json databaseId --jq '.[0].databaseId')
 
 # Block until all jobs complete (or fail)
 gh run watch "$RUN_ID"
