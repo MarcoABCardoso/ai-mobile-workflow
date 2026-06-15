@@ -11,3 +11,8 @@ project_id   = "{{subscription_id}}"
 project_name = "{{project_name}}"
 region       = "{{region}}"
 github_org   = "{{github_org}}"
+
+# Addon flags — set to true for each addon declared in bootstrap-seed.json
+enable_push_notifications = {{addon_push_notifications}}
+enable_realtime           = {{addon_realtime}}
+enable_webhooks           = {{addon_webhooks}}

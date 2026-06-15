@@ -72,6 +72,33 @@ async function run() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
   });
 
+  // ── Addon checks ────────────────────────────────────────────────────────────
+  // Uncomment each block for the addons declared in bootstrap-seed.json.
+
+  // realtime addon: confirm SSE endpoint opens and returns the correct content-type.
+  // await check('SSE endpoint reachable', async () => {
+  //   const controller = new AbortController()
+  //   const res = await fetch(`${PRODUCTION_URL}/api/events`, {
+  //     headers: { Authorization: `Bearer ${SMOKE_TEST_TOKEN}` },
+  //     signal: AbortSignal.timeout(5000),
+  //   })
+  //   controller.abort()
+  //   if (res.status !== 200) throw new Error(`HTTP ${res.status}`)
+  //   const ct = res.headers.get('content-type') ?? ''
+  //   if (!ct.includes('text/event-stream')) throw new Error(`Expected text/event-stream, got: ${ct}`)
+  // })
+
+  // push-notifications addon (Azure): confirm Notification Hub namespace is reachable.
+  // Requires ANH_CONNECTION_STRING and ANH_HUB_NAME to be set in the runtime environment.
+  // await check('Notification Hub reachable', async () => {
+  //   const { NotificationHubsClient } = await import('@azure/notification-hubs')
+  //   const client = new NotificationHubsClient(
+  //     process.env.ANH_CONNECTION_STRING,
+  //     process.env.ANH_HUB_NAME,
+  //   )
+  //   await client.getNotificationHub({})  // lightweight existence check
+  // })
+
   // ── Summary ──────────────────────────────────────────────────────────────────
   const passed = results.filter(r => r.passed).length;
   const failed = results.filter(r => !r.passed).length;

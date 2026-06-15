@@ -22,6 +22,9 @@ param location string = resourceGroup().location
 @description('GitHub org or username — stored in resource tags.')
 param githubOrg string
 
+@description('Enable push notifications via Azure Notification Hubs. Set to true when push-notifications addon is declared in bootstrap-seed.json.')
+param enablePushNotifications bool = false
+
 // ─── Derived names ─────────────────────────────────────────────────────────────
 // Key Vault: max 24 chars, alphanumeric + hyphens.
 // ACR:       max 50 chars, alphanumeric only.
@@ -34,6 +37,8 @@ var tags = {
   owner: githubOrg
   'ai-managed': 'true'
 }
+
+var notifNamespaceName = '${take(projectName, 38)}-dev-nh-ns'  // ≤ 48 chars (max 50)
 
 // ─── Managed Identity ──────────────────────────────────────────────────────────
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -176,6 +181,22 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
+// ─── Push Notification Hub (optional — push-notifications addon) ───────────────
+resource notifNamespace 'Microsoft.NotificationHubs/namespaces@2023-09-01' = if (enablePushNotifications) {
+  name: notifNamespaceName
+  location: location
+  tags: tags
+  sku: { name: 'Free' }
+}
+
+resource notifHub 'Microsoft.NotificationHubs/namespaces/notificationHubs@2023-09-01' = if (enablePushNotifications) {
+  name: '${notifNamespaceName}/default'
+  location: location
+  tags: tags
+  properties: {}
+  dependsOn: [notifNamespace]
+}
+
 // ─── Outputs ───────────────────────────────────────────────────────────────────
 // Bootstrap skill stores these in infra/bootstrap.json after provisioning.
 output identityClientId string = identity.properties.clientId
@@ -183,3 +204,6 @@ output keyVaultUri string = keyVault.properties.vaultUri
 output keyVaultName string = keyVault.name
 output registryLoginServer string = registry.properties.loginServer
 output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
+output notifHubEnabled bool = enablePushNotifications
+output notifHubNamespace string = enablePushNotifications ? notifNamespaceName : ''
+output notifHubName string = enablePushNotifications ? 'default' : ''

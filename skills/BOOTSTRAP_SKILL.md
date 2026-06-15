@@ -43,9 +43,18 @@ Report all failures at once, not one at a time.
     "org": "string — GitHub org or username",
     "visibility": "private | public",
     "default_branch": "main"
-  }
+  },
+  "addons": ["push-notifications", "realtime", "webhooks"]
 }
 ```
+
+`addons` is optional and defaults to `[]`. Include only the capabilities the project needs. Available values:
+
+| Addon | What it adds | Extra cloud cost |
+|---|---|---|
+| `push-notifications` | FCM/ANH send helper, device token registration, mobile token setup | Azure: ~$0 (Free tier) · GCP: $0 |
+| `realtime` | SSE route helper, mobile EventSource hook | None |
+| `webhooks` | HMAC validation plugin, webhook route scaffold | None |
 
 ---
 
@@ -61,6 +70,7 @@ Parse `bootstrap-seed.json`. Display a human-readable summary:
 Bootstrap plan for: <project_name>
 Cloud:              <cloud> (<subscription_id>) — <region>
 Services:           <comma-separated list>
+Addons:             <comma-separated list, or "none">
 Monthly budget cap: $<monthly_budget_usd>
 GitHub:             <org>/<project_name> (<visibility>)
 
@@ -400,6 +410,27 @@ Cloud: <cloud> | Region: <region>
 Use `/infra/<cloud>/` as the reference for all IaC.
 ```
 
+**Conditional addon scaffolding**
+
+Generate the following additional files for each declared addon. See the corresponding ADR for the full code content.
+
+**`push-notifications` addon:**
+- `services/<name>/src/plugins/push.ts` — notification send helper (FCM for GCP, ANH for Azure)
+- `services/<name>/src/routes/devices.ts` — `POST /devices/register` for token storage
+- Add `deviceTokens` table to `services/<name>/src/db/schema.ts`
+- `mobile/lib/notifications.ts` — permission request + token registration on login
+
+**`realtime` addon:**
+- `services/<name>/src/plugins/sse.ts` — in-memory subscriber registry + `subscribeClient` / `pushToUser` decorators
+- `services/<name>/src/routes/events.ts` — `GET /events` SSE endpoint (authenticated)
+- `mobile/hooks/useServerEvents.ts` — `EventSource` hook (uses `react-native-sse` polyfill)
+
+**`webhooks` addon:**
+- `services/<name>/src/plugins/webhooks.ts` — raw body parsing + HMAC `verifyWebhookSignature` decorator
+- `services/<name>/src/routes/webhooks/` — directory for per-provider webhook routes (empty at bootstrap; first route added when a third-party integration is implemented)
+
+---
+
 **Template substitution**
 
 Copy template files from the workflow repo (`ai-mobile-workflow/templates/`) into the new project, substituting `{{placeholders}}` from the seed and derived values. Run this substitution with `sed` or any scripting approach — the key is that no `{{placeholder}}` survives into the committed files.
@@ -423,6 +454,9 @@ Copy template files from the workflow repo (`ai-mobile-workflow/templates/`) int
 | `{{bootstrap_date}}` | Current date in ISO 8601 (e.g. `2026-06-14`) |
 | `{{registry_url}}` | From Step 5 IaC output: ACR login server (Azure) or Artifact Registry URL (GCP) |
 | `{{github_org}}` | `bootstrap-seed.json` → `github.org` |
+| `{{addon_push_notifications}}` | `true` if `push-notifications` in `addons`, else `false` |
+| `{{addon_realtime}}` | `true` if `realtime` in `addons`, else `false` |
+| `{{addon_webhooks}}` | `true` if `webhooks` in `addons`, else `false` |
 
 For the `{{#each services}}` blocks in `CLAUDE.md`:
 - `name` — service name from seed
@@ -590,6 +624,39 @@ echo "Firebase Auth configured. App ID: $FIREBASE_APP_ID"
 ```
 
 > The Firebase Admin SDK running on Cloud Run uses the service account's Application Default Credentials (ADC) — no explicit secret is needed for server-side JWT validation.
+
+---
+
+**Addon provisioning (runs after auth setup, only for declared addons)**
+
+**`push-notifications` addon — Azure only** (GCP: FCM is already available, no provisioning needed):
+```bash
+# Retrieve the Notification Hub connection string and store it in Key Vault
+ANH_CONN=$(az notification-hub namespace authorization-rule list-keys \
+  --resource-group "$RESOURCE_GROUP" \
+  --namespace-name "<project_name>-dev-nh-ns" \
+  --notification-hub-name "default" \
+  --name DefaultFullSharedAccessSignature \
+  --query primaryConnectionString -o tsv)
+
+az keyvault secret set --vault-name "$KV_NAME" --name "ANH-CONNECTION-STRING" --value "$ANH_CONN"
+az keyvault secret set --vault-name "$KV_NAME" --name "ANH-HUB-NAME" --value "default"
+```
+
+**`webhooks` addon — both clouds** (add the webhook secret for each third-party provider):
+```bash
+# Azure — repeat for each provider
+az keyvault secret set --vault-name "$KV_NAME" \
+  --name "<PROVIDER>-WEBHOOK-SECRET" --value "<secret-from-provider-dashboard>"
+
+# GCP — repeat for each provider
+gcloud secrets create "<project_name>-<provider>-webhook-secret" --project "$GCP_PROJECT_ID"
+echo -n "<secret-from-provider-dashboard>" | \
+  gcloud secrets versions add "<project_name>-<provider>-webhook-secret" --data-file=- \
+  --project "$GCP_PROJECT_ID"
+```
+
+**`realtime` addon** — no provisioning needed. IaC already applied the Cloud Run timeout extension. Document the Redis Pub/Sub requirement in the project `CLAUDE.md` if multi-instance scaling is anticipated.
 
 ---
 

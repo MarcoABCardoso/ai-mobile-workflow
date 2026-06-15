@@ -67,7 +67,7 @@ These are the next items to complete before the workflow is ready for a pilot pr
 | Auth | Firebase Auth (GCP) / Azure AD B2C (Azure) |
 | Cloud platform | Selected per project at bootstrap (Azure or GCP) |
 | Branching model | Trunk-based (feature branches → main) |
-| Event-driven messaging | REST only for now |
+| Event-driven messaging | REST + SSE (realtime addon) + inbound webhooks (webhooks addon) |
 | Visual regression | Manual screenshot review in PRs |
 | Dev environment | Dev Containers (no Loft Labs yet) |
 | iOS Simulator | CI only (GitHub Actions macOS runner) |
