@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "family-safe",
+    "slug": "family-safe",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "scheme": "family-safe",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.marcoabcardoso.familysafe"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.marcoabcardoso.familysafe"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-notifications", { "sounds": [] }]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
