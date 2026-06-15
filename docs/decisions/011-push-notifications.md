@@ -97,6 +97,32 @@ export async function registerForPushNotifications(): Promise<void> {
 
 Call `registerForPushNotifications()` after a successful login.
 
+**`mobile/app.config.js` — required Expo config plugin and iOS background mode:**
+```javascript
+export default {
+  expo: {
+    // ... other config
+    plugins: [
+      [
+        'expo-notifications',
+        {
+          icon: './assets/notification-icon.png',  // 96×96 PNG, white on transparent
+          color: '#ffffff',
+        },
+      ],
+    ],
+    ios: {
+      infoPlist: {
+        // Required for iOS to wake the app for background push delivery
+        UIBackgroundModes: ['remote-notification'],
+      },
+    },
+  },
+}
+```
+
+> Without `UIBackgroundModes: ['remote-notification']`, iOS will not wake the app to handle push notifications received in the background. This is a native capability — it cannot be added at runtime and must be present before the app is submitted to the App Store or tested on a physical device.
+
 ## Bootstrap provisioning (Step 5 addition)
 
 **Azure only** — store the Notification Hub connection string in Key Vault:

@@ -263,9 +263,11 @@ Each backend service lives in `/services/<service-name>/` with its own:
 **AI can work on multiple services in one session**, coordinating schema changes that ripple across service boundaries and into the mobile client.
 
 **Service communication patterns supported:**
-- REST (OpenAPI contracts)
-- GraphQL
-- Event-driven (message queues — Azure Service Bus, GCP Pub/Sub) ❓
+- REST (OpenAPI contracts) — default for all request/response interactions
+- SSE / Server-Sent Events — server→client push when `realtime` addon is declared (ADR 012)
+- Inbound webhooks — third-party async events when `webhooks` addon is declared (ADR 013)
+- Push notifications — background device delivery when `push-notifications` addon is declared (ADR 011)
+- Event-driven (message queues — Azure Service Bus, GCP Pub/Sub) ❓ — not yet supported
 
 ---
 

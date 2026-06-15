@@ -106,6 +106,58 @@ The in-memory subscriber registry only works on a **single-instance** deployment
 
 This is out of scope for the initial addon scaffold. The in-memory approach is correct for development and for single-instance production deployments (min instances = 1 with session affinity).
 
+## Wiring SSE events to TanStack Query
+
+SSE delivers raw events; TanStack Query owns the data cache. Connect them by calling `invalidateQueries` or `setQueryData` in the `onEvent` callback:
+
+```typescript
+// In a screen or layout component — place near the root so the subscription stays alive
+import { useQueryClient } from '@tanstack/react-query'
+import { useServerEvents } from '../hooks/useServerEvents'
+
+export function RealtimeSync() {
+  const queryClient = useQueryClient()
+
+  useServerEvents((type, data) => {
+    switch (type) {
+      case 'item-created':
+      case 'item-updated':
+      case 'item-deleted':
+        // Invalidate → next render triggers a background refetch
+        queryClient.invalidateQueries({ queryKey: ['items'] })
+        break
+
+      case 'notification':
+        // Prepend to the existing cache without a round-trip
+        queryClient.setQueryData<Notification[]>(
+          ['notifications'],
+          (old = []) => [data as Notification, ...old]
+        )
+        break
+    }
+  })
+
+  return null  // no UI — side-effect only
+}
+```
+
+Mount `<RealtimeSync />` inside the authenticated layout (`mobile/app/(app)/_layout.tsx`) so it runs only when the user is signed in.
+
+`invalidateQueries` is the safer default: it triggers a background refetch and lets the server response set the final state. Use `setQueryData` only for append-only operations (e.g. new notifications) where you can trust the event payload completely.
+
+## Exclude the SSE route from the generated OpenAPI spec
+
+The `GET /events` endpoint returns `text/event-stream`, not JSON, so `openapi-fetch` cannot consume it and it should not appear in `openapi.yaml`. Use Fastify's `hide` property:
+
+```typescript
+app.get('/events', {
+  schema: {
+    hide: true,       // omit from generated openapi.yaml
+    security: [{ bearerAuth: [] }],
+  },
+}, handler)
+```
+
 ## When to use WebSockets instead
 
 Use WebSockets when the client needs to send high-frequency data to the server over the same persistent connection — e.g. collaborative editing, real-time cursors, or a full messaging app. Add `@fastify/websocket` to the service when this is needed. SSE remains appropriate for everything else.

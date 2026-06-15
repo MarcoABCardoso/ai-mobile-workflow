@@ -13,46 +13,47 @@ A shared Fastify plugin (`src/plugins/webhooks.ts`) provides HMAC signature vali
 
 ## What gets scaffolded
 
-**Validation plugin (`src/plugins/webhooks.ts`):**
+**Signature utility (`src/plugins/webhooks.ts`) — plain function, not a Fastify plugin:**
 ```typescript
-import fp from 'fastify-plugin'
 import { createHmac, timingSafeEqual } from 'crypto'
 
-export default fp(async (app) => {
-  // Parse the body as a raw Buffer so we can verify the signature before parsing JSON.
-  // This content-type parser runs for all webhook routes — non-webhook routes
-  // are unaffected because they don't use this plugin's decorator.
+// Exported as a plain function, not a Fastify decorator, so it can be imported
+// directly into route handlers without requiring a global plugin registration.
+export function verifyWebhookSignature(
+  body: Buffer,
+  receivedSignature: string,
+  secret: string,
+  algorithm: 'sha256' | 'sha1' = 'sha256'
+): boolean {
+  const expected = createHmac(algorithm, secret).update(body).digest('hex')
+  // receivedSignature may be prefixed: "sha256=abc123" — strip it
+  const received = receivedSignature.replace(/^(sha256|sha1)=/, '')
+  try {
+    return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(received, 'hex'))
+  } catch {
+    return false  // mismatched lengths → not equal
+  }
+}
+```
+
+**Webhook route scope (`src/routes/webhooks/index.ts`) — encapsulated Fastify plugin:**
+```typescript
+import type { FastifyInstance } from 'fastify'
+import { verifyWebhookSignature } from '../../plugins/webhooks'
+
+// IMPORTANT: do NOT wrap with fastify-plugin (fp()). This plugin is intentionally
+// encapsulated so that addContentTypeParser only applies within this scope and
+// does not override JSON parsing for the rest of the application.
+export default async function webhookRoutes(app: FastifyInstance) {
+  // Buffer parsing scoped to this plugin only — non-webhook routes are unaffected
   app.addContentTypeParser(
     'application/json',
     { parseAs: 'buffer' },
     (_req, body, done) => done(null, body)
   )
 
-  app.decorate('verifyWebhookSignature', (
-    body: Buffer,
-    receivedSignature: string,
-    secret: string,
-    algorithm: 'sha256' | 'sha1' = 'sha256'
-  ): boolean => {
-    const expected = createHmac(algorithm, secret).update(body).digest('hex')
-    // receivedSignature may be prefixed: "sha256=abc123" — strip the prefix
-    const received = receivedSignature.replace(/^(sha256|sha1)=/, '')
-    try {
-      return timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(received, 'hex'))
-    } catch {
-      return false  // mismatched lengths → not equal
-    }
-  })
-})
-```
-
-**Example webhook route (`src/routes/webhooks/stripe.ts`):**
-```typescript
-import type { FastifyInstance } from 'fastify'
-
-export default async function stripeWebhooks(app: FastifyInstance) {
   app.post('/webhooks/stripe', async (req, reply) => {
-    const valid = app.verifyWebhookSignature(
+    const valid = verifyWebhookSignature(
       req.body as Buffer,
       req.headers['stripe-signature'] as string ?? '',
       process.env.STRIPE_WEBHOOK_SECRET!,
@@ -63,24 +64,28 @@ export default async function stripeWebhooks(app: FastifyInstance) {
 
     switch (event.type) {
       case 'customer.subscription.created':
-        // handle subscription creation
         break
       case 'customer.subscription.deleted':
-        // handle cancellation
         break
-      default:
-        // Unknown event type — acknowledge receipt, take no action
     }
 
     return reply.status(200).send()
   })
+
+  // Add more providers here: app.post('/webhooks/revenuecat', ...)
 }
 ```
 
-Register the webhook routes in `src/index.ts`:
+Register the webhook scope in `src/index.ts` — no `fp()` wrapping at the call site either:
 ```typescript
-await app.register(webhookPlugin)
-await app.register(stripeWebhooks)
+await app.register(webhookRoutes)  // encapsulation preserved — JSON routes unaffected
+```
+
+**Exclude webhook routes from the generated OpenAPI spec** — they are not called by the mobile client and do not fit the JSON request/response model. Use Fastify's `hide` schema property:
+```typescript
+app.post('/webhooks/stripe', {
+  schema: { hide: true },  // omit from openapi.yaml
+}, handler)
 ```
 
 ## Secret storage
