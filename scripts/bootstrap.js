@@ -49,6 +49,11 @@ function template(srcRel, destRel, map = {}, asIs = false) {
   file(destRel, content)
 }
 
+// Copy a scaffold template for a specific service
+function svcTemplate(svc, relPath, subs) {
+  template(`templates/scaffold/services/_service/${relPath}`, `${svc}/${relPath}`, subs)
+}
+
 // Activate or remove [addon:name] blocks in a template file.
 // Active addon: uncomment the body lines (strip leading `  // `), remove markers.
 // Inactive addon: remove the entire block including markers.
@@ -176,11 +181,16 @@ console.log('\n── Copying templates ─────────────�
 template('templates/CLAUDE.md.template', 'CLAUDE.md', SUBS)
 template('templates/ci.yml', '.github/workflows/ci.yml', {}, true)
 template('templates/preview.yml', '.github/workflows/preview.yml', {}, true)
-template('templates/deploy-prod.yml', '.github/workflows/deploy-prod.yml', SUBS)
+// Cloud-specific deploy workflow — azure or gcp variant, with registry guard
+template(`templates/deploy-prod.${CLOUD}.yml`, '.github/workflows/deploy-prod.yml', SUBS)
 
 // smoke-tests.js: substitute placeholders then activate/remove addon blocks
 const smokeRaw = readFileSync(join(WORKFLOW_DIR, 'templates/smoke-tests.js'), 'utf8')
 file('scripts/smoke-tests.js', applyAddons(sub(smokeRaw, SUBS), ADDONS))
+
+// Skills — copied into the project for the AI working on features
+template('skills/FEATURE_SKILL.md',   'skills/FEATURE_SKILL.md',   {}, true)
+template('skills/BOOTSTRAP_SKILL.md', 'skills/BOOTSTRAP_SKILL.md', {}, true)
 
 if (CLOUD === 'azure') {
   template('infra/azure/dev/main.bicep',      'infra/azure/dev/main.bicep',      {}, true)
@@ -294,321 +304,50 @@ for (let i = 0; i < SVCS.length; i++) {
   const svc  = `services/${name}`
   console.log(`  service: ${name} (port ${port})`)
 
-  file(`${svc}/src/index.ts`, `import Fastify from 'fastify'
-import sensible from '@fastify/sensible'
-import swagger from '@fastify/swagger'
-import swaggerUi from '@fastify/swagger-ui'
-import auth from './plugins/auth.js'
+  const svcSubs = { ...SUBS, service_name: name, service_port: String(port) }
 
-export const app = Fastify({ logger: true })
+  // Source files — read from templates/scaffold/services/_service/
+  svcTemplate(svc, 'src/index.ts',              svcSubs)
+  svcTemplate(svc, 'src/db/schema.ts',          svcSubs)
+  svcTemplate(svc, 'src/db/index.ts',           svcSubs)
+  svcTemplate(svc, 'tests/health.test.ts',      svcSubs)
+  svcTemplate(svc, 'scripts/export-openapi.ts', svcSubs)
+  svcTemplate(svc, 'openapi.yaml',              svcSubs)
+  svcTemplate(svc, 'Dockerfile',                svcSubs)
+  svcTemplate(svc, 'drizzle.config.ts',         svcSubs)
+  svcTemplate(svc, 'vitest.config.ts',          svcSubs)
 
-await app.register(sensible)
-await app.register(swagger, {
-  openapi: {
-    info: { title: '${name}', version: '1.0.0' },
-    components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' } } },
-  },
-})
-await app.register(swaggerUi, { routePrefix: '/docs' })
-await app.register(auth)
+  // Auth plugin — cloud-specific template
+  template(
+    `templates/scaffold/services/_service/src/plugins/auth.${CLOUD}.ts`,
+    `${svc}/src/plugins/auth.ts`,
+    svcSubs,
+  )
 
-app.get('/health', {
-  schema: { response: { 200: { type: 'object', properties: { status: { type: 'string' } } } } },
-}, async () => ({ status: 'ok' }))
-
-// Register feature route modules here
-
-if (process.env.NODE_ENV !== 'test') {
-  await app.listen({ port: ${port}, host: '0.0.0.0' })
-}
-`)
-
-  file(`${svc}/src/db/schema.ts`, `import { pgTable, uuid, text, timestamp } from 'drizzle-orm/pg-core'
-
-export const users = pgTable('users', {
-  id:         uuid('id').primaryKey().defaultRandom(),
-  externalId: text('external_id').notNull().unique(),
-  createdAt:  timestamp('created_at').defaultNow().notNull(),
-})
-`)
-
-  file(`${svc}/src/db/index.ts`, `import { drizzle } from 'drizzle-orm/node-postgres'
-import { Pool } from 'pg'
-import * as schema from './schema.js'
-
-export const db = drizzle(new Pool({ connectionString: process.env.DATABASE_URL }), { schema })
-`)
-
-  file(`${svc}/src/plugins/auth.ts`, CLOUD === 'azure' ? `import fp from 'fastify-plugin'
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify'
-import { createRemoteJWKSet, jwtVerify } from 'jose'
-
-const B2C_TENANT = process.env.AZURE_AD_B2C_TENANT_NAME!
-const B2C_POLICY = process.env.AZURE_AD_B2C_POLICY_NAME!
-const B2C_CLIENT = process.env.AZURE_AD_B2C_CLIENT_ID!
-const jwks = createRemoteJWKSet(new URL(
-  \`https://\${B2C_TENANT}/\${B2C_TENANT}/\${B2C_POLICY}/discovery/v2.0/keys\`,
-))
-
-declare module 'fastify' {
-  interface FastifyRequest { user: { sub: string; email?: string } }
-  interface FastifyInstance { authenticate: (req: FastifyRequest) => Promise<void> }
-}
-
-const authPlugin: FastifyPluginAsync = async (fastify) => {
-  fastify.decorate('authenticate', async (request: FastifyRequest) => {
-    const auth = request.headers.authorization
-    if (!auth?.startsWith('Bearer ')) throw fastify.httpErrors.unauthorized()
-    const { payload } = await jwtVerify(auth.slice(7), jwks, {
-      issuer:   \`https://\${B2C_TENANT}/\${B2C_TENANT}/\${B2C_POLICY}/v2.0/\`,
-      audience: B2C_CLIENT,
-    })
-    request.user = { sub: payload.sub as string, email: payload.email as string | undefined }
-  })
-}
-export default fp(authPlugin)
-` : `import fp from 'fastify-plugin'
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify'
-import { createRemoteJWKSet, jwtVerify } from 'jose'
-
-const FIREBASE_PROJECT = process.env.FIREBASE_PROJECT_ID!
-const jwks = createRemoteJWKSet(new URL(
-  'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
-))
-
-declare module 'fastify' {
-  interface FastifyRequest { user: { sub: string; email?: string } }
-  interface FastifyInstance { authenticate: (req: FastifyRequest) => Promise<void> }
-}
-
-const authPlugin: FastifyPluginAsync = async (fastify) => {
-  fastify.decorate('authenticate', async (request: FastifyRequest) => {
-    const auth = request.headers.authorization
-    if (!auth?.startsWith('Bearer ')) throw fastify.httpErrors.unauthorized()
-    const { payload } = await jwtVerify(auth.slice(7), jwks, {
-      issuer:   \`https://securetoken.google.com/\${FIREBASE_PROJECT}\`,
-      audience: FIREBASE_PROJECT,
-    })
-    request.user = { sub: payload.sub as string, email: payload.email as string | undefined }
-  })
-}
-export default fp(authPlugin)
-`)
-
-  // Addon files — push-notifications
+  // Addon: push-notifications
   if (ADDONS.includes('push-notifications')) {
-    file(`${svc}/src/plugins/push.ts`, CLOUD === 'azure' ? `import { NotificationHubsClient } from '@azure/notification-hubs'
-import fp from 'fastify-plugin'
-
-const client = new NotificationHubsClient(
-  process.env.ANH_CONNECTION_STRING!,
-  process.env.ANH_HUB_NAME!,
-)
-
-declare module 'fastify' {
-  interface FastifyInstance {
-    push: { send(token: string, platform: 'apns' | 'fcm', title: string, body: string): Promise<void> }
-  }
-}
-
-export default fp(async (fastify) => {
-  fastify.decorate('push', {
-    async send(token: string, platform: 'apns' | 'fcm', title: string, body: string) {
-      await client.sendNotification(
-        platform === 'apns'
-          ? { kind: 'apple', body: JSON.stringify({ aps: { alert: { title, body } } }) }
-          : { kind: 'firebase', body: JSON.stringify({ message: { notification: { title, body }, token } }) },
-      )
-    },
-  })
-})
-` : `import { getMessaging } from 'firebase-admin/messaging'
-import fp from 'fastify-plugin'
-
-declare module 'fastify' {
-  interface FastifyInstance {
-    push: { send(token: string, title: string, body: string): Promise<void> }
-  }
-}
-
-export default fp(async (fastify) => {
-  fastify.decorate('push', {
-    async send(token: string, title: string, body: string) {
-      await getMessaging().send({ token, notification: { title, body } })
-    },
-  })
-})
-`)
-
-    file(`${svc}/src/routes/devices.ts`, `import type { FastifyPluginAsync } from 'fastify'
-
-const devices: FastifyPluginAsync = async (fastify) => {
-  fastify.post('/devices/register', {
-    preHandler: [fastify.authenticate],
-    schema: {
-      security: [{ bearerAuth: [] }],
-      body: {
-        type: 'object',
-        required: ['token', 'platform'],
-        properties: {
-          token:    { type: 'string' },
-          platform: { type: 'string', enum: ['ios', 'android'] },
-        },
-      },
-      response: { 200: { type: 'object', properties: { ok: { type: 'boolean' } } } },
-    },
-  }, async (request) => {
-    // TODO: upsert token in db.deviceTokens keyed by request.user.sub
-    return { ok: true }
-  })
-}
-export default devices
-`)
+    template(
+      `templates/scaffold/services/_service/src/plugins/push.${CLOUD}.ts`,
+      `${svc}/src/plugins/push.ts`,
+      svcSubs,
+    )
+    svcTemplate(svc, 'src/routes/devices.ts', svcSubs)
   }
 
-  // Addon files — realtime
+  // Addon: realtime (SSE)
   if (ADDONS.includes('realtime')) {
-    file(`${svc}/src/plugins/sse.ts`, `import fp from 'fastify-plugin'
-import type { FastifyReply } from 'fastify'
-
-type Subscriber = { userId: string; reply: FastifyReply }
-const subscribers: Subscriber[] = []
-
-declare module 'fastify' {
-  interface FastifyInstance {
-    sse: {
-      subscribe(userId: string, reply: FastifyReply): void
-      push(userId: string, event: string, data: unknown): void
-    }
-  }
-}
-
-export default fp(async (fastify) => {
-  fastify.decorate('sse', {
-    subscribe(userId: string, reply: FastifyReply) {
-      subscribers.push({ userId, reply })
-      reply.raw.on('close', () => {
-        const idx = subscribers.findIndex(s => s.reply === reply)
-        if (idx !== -1) subscribers.splice(idx, 1)
-      })
-    },
-    push(userId: string, event: string, data: unknown) {
-      subscribers
-        .filter(s => s.userId === userId)
-        .forEach(s => s.reply.raw.write(\`event: \${event}\\ndata: \${JSON.stringify(data)}\\n\\n\`))
-    },
-  })
-})
-`)
-
-    file(`${svc}/src/routes/events.ts`, `import type { FastifyPluginAsync } from 'fastify'
-
-const events: FastifyPluginAsync = async (fastify) => {
-  fastify.get('/events', {
-    preHandler: [fastify.authenticate],
-    schema: { security: [{ bearerAuth: [] }] },
-  }, async (request, reply) => {
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    })
-    fastify.sse.subscribe(request.user.sub, reply)
-  })
-}
-export default events
-`)
+    svcTemplate(svc, 'src/plugins/sse.ts',   svcSubs)
+    svcTemplate(svc, 'src/routes/events.ts', svcSubs)
   }
 
-  // Addon files — webhooks
+  // Addon: webhooks
   if (ADDONS.includes('webhooks')) {
-    file(`${svc}/src/plugins/webhooks.ts`, `import fp from 'fastify-plugin'
-import { createHmac, timingSafeEqual } from 'crypto'
-
-declare module 'fastify' {
-  interface FastifyInstance {
-    verifyWebhookSignature(payload: Buffer, signature: string, secret: string): boolean
-  }
-}
-
-export default fp(async (fastify) => {
-  fastify.decorate('verifyWebhookSignature', (payload: Buffer, signature: string, secret: string) => {
-    const expected = 'sha256=' + createHmac('sha256', secret).update(payload).digest('hex')
-    const a = Buffer.from(signature)
-    const b = Buffer.from(expected)
-    if (a.length !== b.length) return false
-    return timingSafeEqual(a, b)
-  })
-})
-`)
-    file(`${svc}/src/routes/webhooks/.gitkeep`, '')
+    svcTemplate(svc, 'src/plugins/webhooks.ts',        svcSubs)
+    svcTemplate(svc, 'src/routes/webhooks/.gitkeep',   svcSubs)
   }
 
-  // Service config files
-  file(`${svc}/drizzle.config.ts`, `import { defineConfig } from 'drizzle-kit'
-export default defineConfig({
-  schema:        './src/db/schema.ts',
-  out:           './drizzle',
-  dialect:       'postgresql',
-  dbCredentials: { url: process.env.DATABASE_URL! },
-})
-`)
-
-  file(`${svc}/vitest.config.ts`, `import { defineConfig } from 'vitest/config'
-export default defineConfig({ test: { globals: true, environment: 'node' } })
-`)
-
-  file(`${svc}/tests/health.test.ts`, `import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { app } from '../src/index.js'
-
-beforeAll(() => app.ready())
-afterAll(() => app.close())
-
-describe('health', () => {
-  it('returns ok', async () => {
-    const res = await app.inject({ method: 'GET', url: '/health' })
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toEqual({ status: 'ok' })
-  })
-})
-`)
-
-  file(`${svc}/scripts/export-openapi.ts`, `import { writeFileSync } from 'fs'
-import yaml from 'js-yaml'
-import { app } from '../src/index.js'
-
-await app.ready()
-writeFileSync('openapi.yaml', yaml.dump(app.swagger()))
-await app.close()
-`)
-
-  file(`${svc}/openapi.yaml`, `openapi: 3.0.0
-info:
-  title: ${name}
-  version: 1.0.0
-paths:
-  /health:
-    get:
-      summary: Health check
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status: { type: string }
-`)
-
-  file(`${svc}/Dockerfile`, `FROM node:20-slim
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
-COPY dist/ dist/
-EXPOSE ${port}
-CMD ["node", "dist/index.js"]
-`)
+  // Integration test placeholder
+  svcTemplate(svc, 'tests/integration/.gitkeep', svcSubs)
 
   const svcDeps = {
     '@fastify/sensible':   '^5.6.0',
@@ -704,79 +443,18 @@ file('mobile/app.json', json({
   },
 }))
 
-file('mobile/__tests__/smoke.test.ts', `describe('smoke', () => {
-  it('jest is configured correctly', () => {
-    expect(true).toBe(true)
-  })
-})
-`)
-
-file('mobile/app/_layout.tsx', `import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { Stack } from 'expo-router'
-
-const queryClient = new QueryClient()
-
-export default function RootLayout() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <Stack />
-    </QueryClientProvider>
-  )
-}
-`)
-
-file('mobile/app/(tabs)/index.tsx', `import { View, Text, StyleSheet } from 'react-native'
-
-export default function HomeScreen() {
-  return (
-    <View style={styles.container}>
-      <Text style={styles.title}>${P}</Text>
-    </View>
-  )
-}
-
-const styles = StyleSheet.create({
-  container: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  title:     { fontSize: 24, fontWeight: 'bold' },
-})
-`)
+template('templates/scaffold/mobile/__tests__/smoke.test.ts', 'mobile/__tests__/smoke.test.ts', SUBS)
+template('templates/scaffold/mobile/app/_layout.tsx',         'mobile/app/_layout.tsx',         SUBS)
+template('templates/scaffold/mobile/app/(tabs)/index.tsx',    'mobile/app/(tabs)/index.tsx',    SUBS)
 
 file('mobile/components/.gitkeep', '')
 
 if (ADDONS.includes('realtime')) {
-  file('mobile/hooks/useServerEvents.ts', `import { useEffect } from 'react'
-import EventSource from 'react-native-sse'
-
-export function useServerEvents(
-  url: string,
-  token: string,
-  handlers: Record<string, (data: unknown) => void>,
-) {
-  useEffect(() => {
-    const es = new EventSource(url, { headers: { Authorization: \`Bearer \${token}\` } })
-    Object.entries(handlers).forEach(([event, handler]) => {
-      es.addEventListener(event, (e) => handler(JSON.parse((e as MessageEvent).data)))
-    })
-    return () => es.close()
-  }, [url, token])
-}
-`)
+  template('templates/scaffold/mobile/hooks/useServerEvents.ts', 'mobile/hooks/useServerEvents.ts', SUBS)
 }
 
 if (ADDONS.includes('push-notifications')) {
-  file('mobile/lib/notifications.ts', `import * as Notifications from 'expo-notifications'
-import { apiClient } from '@${P}/api-client'
-
-export async function registerPushToken() {
-  const { status } = await Notifications.requestPermissionsAsync()
-  if (status !== 'granted') return
-
-  const { data: token } = await Notifications.getExpoPushTokenAsync()
-  await apiClient.POST('/devices/register', {
-    body: { token, platform: 'ios' },
-  })
-}
-`)
+  template('templates/scaffold/mobile/lib/notifications.ts', 'mobile/lib/notifications.ts', SUBS)
 }
 
 // ── 7. Shared packages ────────────────────────────────────────────────────────
@@ -784,7 +462,7 @@ export async function registerPushToken() {
 console.log('\n── Generating shared packages ───────────────────────────────────\n')
 
 file('shared/types/package.json', json({ name: `@${P}/types`, private: true, type: 'module', main: 'index.ts' }))
-file('shared/types/index.ts', '// Shared type definitions\nexport {}\n')
+template('templates/scaffold/shared/types/index.ts', 'shared/types/index.ts', SUBS)
 
 file('shared/api-client/package.json', json({
   name: `@${P}/api-client`,
@@ -795,20 +473,8 @@ file('shared/api-client/package.json', json({
   devDependencies: { 'openapi-typescript': '^7.0.0' },
 }))
 
-file('shared/api-client/src/index.ts', `import createClient from 'openapi-fetch'
-import type { paths } from './generated/types.js'
-
-export const apiClient = createClient<paths>({
-  baseUrl: process.env['EXPO_PUBLIC_API_URL'] ?? 'http://localhost:3001',
-})
-`)
-
-file('shared/api-client/src/generated/types.d.ts', `// Auto-generated by openapi-typescript. Do not edit manually.
-// Run: npm run generate (from shared/api-client/)
-export interface paths {}
-export interface components {}
-export interface operations {}
-`)
+template('templates/scaffold/shared/api-client/src/index.ts',              'shared/api-client/src/index.ts',              SUBS)
+template('templates/scaffold/shared/api-client/src/generated/types.d.ts',  'shared/api-client/src/generated/types.d.ts',  SUBS)
 
 // ── 8. PROVISIONING.md (deferred provisioning only) ──────────────────────────
 
