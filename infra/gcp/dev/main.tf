@@ -49,6 +49,27 @@ variable "github_org" {
   type        = string
 }
 
+# ─── Addon flags ────────────────────────────────────────────────────────────────
+# Set to true for each addon declared in bootstrap-seed.json.
+
+variable "enable_push_notifications" {
+  description = "push-notifications addon. FCM is already available via firebase.googleapis.com — no extra resources needed; this flag enables the scaffold only."
+  type        = bool
+  default     = false
+}
+
+variable "enable_realtime" {
+  description = "realtime addon. Extends Cloud Run request timeout to 3600s for long-lived SSE connections."
+  type        = bool
+  default     = false
+}
+
+variable "enable_webhooks" {
+  description = "webhooks addon. No additional GCP resources needed — handled entirely in application code."
+  type        = bool
+  default     = false
+}
+
 # ─── Locals ─────────────────────────────────────────────────────────────────────
 
 locals {
@@ -144,6 +165,9 @@ resource "google_cloud_run_v2_service" "api" {
   template {
     service_account = google_service_account.app.email
     labels          = local.labels
+
+    # SSE connections are long-lived — extend timeout when realtime addon is enabled
+    timeout = var.enable_realtime ? "3600s" : "300s"
 
     scaling {
       min_instance_count = 0   # scale to zero when idle — dev cost saving

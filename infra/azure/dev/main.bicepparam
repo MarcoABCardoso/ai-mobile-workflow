@@ -4,6 +4,7 @@
 
 using './main.bicep'
 
-param projectName = '{{project_name}}'
-param location    = '{{region}}'
-param githubOrg   = '{{github_org}}'
+param projectName             = '{{project_name}}'
+param location                = '{{region}}'
+param githubOrg               = '{{github_org}}'
+param enablePushNotifications = {{addon_push_notifications}}  // true | false
