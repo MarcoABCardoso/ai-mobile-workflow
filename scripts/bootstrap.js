@@ -129,7 +129,25 @@ console.log('Skip provisioning:', SKIP)
 
 // ── 2. Git branch ─────────────────────────────────────────────────────────────
 
-console.log('\n── Creating branch ──────────────────────────────────────────────\n')
+console.log('\n── Creating branches ────────────────────────────────────────────\n')
+
+// Ensure main exists locally as the PR base before we branch from it.
+// An empty cloned repo (no commits yet) has no branches at all, and local git
+// may default to "master". We always want main → bootstrap/init.
+let mainExists = false
+try {
+  execSync('git rev-parse --verify main', { stdio: 'pipe', cwd: PROJECT_DIR })
+  mainExists = true
+} catch { /* main doesn't exist yet */ }
+
+if (!mainExists) {
+  run('git checkout --orphan main')
+  run('git commit --allow-empty -m "chore: init"')
+  console.log('  ✔ created main branch (empty init commit)')
+} else {
+  run('git checkout main')
+}
+
 run('git checkout -b bootstrap/init')
 
 // Write .gitignore immediately after branch creation, before any other files.
@@ -806,6 +824,7 @@ console.log(`
   Addons:   ${ADDONS.length ? ADDONS.join(', ') : 'none'}
 ${SKIP ? '\n  ⚠️  Provisioning deferred — see PROVISIONING.md\n' : ''}
 Next:
-  git push -u origin bootstrap/init
+  git push origin main                    # establish main on the remote (PR base)
+  git push -u origin bootstrap/init       # push the scaffold branch
   # Then follow BOOTSTRAP_SKILL.md for provisioning (if not deferred) and opening the PR
 `)
