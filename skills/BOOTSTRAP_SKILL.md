@@ -115,7 +115,7 @@ Generate the following structure. All files are templates — fill in `<project_
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml              ← lint, test, build on every PR
-│       └── deploy-staging.yml  ← deploy on merge to main
+│       └── deploy-prod.yml     ← deploy to production on merge to main
 ├── CLAUDE.md                   ← project-level AI instructions (see template below)
 ├── turbo.json
 ├── package.json                ← workspace root with workspaces glob
@@ -187,8 +187,8 @@ RUN curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 # Terraform
 RUN apt-get install -y terraform
 
-# Expo + Playwright
-RUN npm install -g expo-cli && \
+# Expo + Playwright + Firebase CLI
+RUN npm install -g expo-cli firebase-tools && \
     npx playwright install --with-deps chromium
 
 # Android SDK + emulator
@@ -261,6 +261,46 @@ Cloud: <cloud> | Region: <region>
 Use `/infra/<cloud>/` as the reference for all IaC.
 ```
 
+**Template substitution**
+
+Copy template files from the workflow repo (`ai-mobile-workflow/templates/`) into the new project, substituting `{{placeholders}}` from the seed and derived values. Run this substitution with `sed` or any scripting approach — the key is that no `{{placeholder}}` survives into the committed files.
+
+| Source (workflow repo) | Destination (new project) | Notes |
+|---|---|---|
+| `templates/CLAUDE.md.template` | `CLAUDE.md` | Substitute all placeholders (see table below) |
+| `templates/ci.yml` | `.github/workflows/ci.yml` | Copy as-is — no placeholders |
+| `templates/deploy-prod.yml` | `.github/workflows/deploy-prod.yml` | Substitute placeholders |
+| `templates/smoke-tests.js` | `scripts/smoke-tests.js` | Copy as-is — uses env vars at runtime |
+
+**Placeholder substitution table:**
+
+| Placeholder | Value |
+|---|---|
+| `{{project_name}}` | `bootstrap-seed.json` → `project_name` |
+| `{{cloud}}` | `bootstrap-seed.json` → `cloud` |
+| `{{region}}` | `bootstrap-seed.json` → `region` |
+| `{{services}}` | `bootstrap-seed.json` → `services` joined as comma-separated string |
+| `{{auth_provider}}` | Derived: `cloud=azure` → `azure-ad-b2c` · `cloud=gcp` → `firebase-auth` |
+| `{{bootstrap_date}}` | Current date in ISO 8601 (e.g. `2026-06-14`) |
+| `{{registry_url}}` | From Step 5 IaC output: ACR login server (Azure) or Artifact Registry URL (GCP) |
+| `{{github_org}}` | `bootstrap-seed.json` → `github.org` |
+
+For the `{{#each services}}` blocks in `CLAUDE.md`:
+- `name` — service name from seed
+- `description` — `"Backend service — fill in after first feature"` (placeholder)
+- `port` — assign sequentially starting at `3001`
+- `auth_required` — `true` (default; adjust per-service if needed)
+
+For the `{{#each cloud_resources}}` block — leave as a stub until Step 5 provisioning completes, then backfill from the IaC outputs.
+
+Also substitute placeholders in the IaC parameter files from the workflow repo:
+| Source | Destination | Notes |
+|---|---|---|
+| `infra/azure/dev/main.bicep` | `infra/azure/dev/main.bicep` | Copy as-is — uses Bicep `param` |
+| `infra/azure/dev/main.bicepparam` | `infra/azure/dev/main.bicepparam` | Substitute `{{project_name}}`, `{{region}}`, `{{github_org}}` |
+| `infra/gcp/dev/main.tf` | `infra/gcp/dev/main.tf` | Copy as-is — uses Terraform `variable` |
+| `infra/gcp/dev/terraform.tfvars.example` | `infra/gcp/dev/terraform.tfvars` | Substitute all placeholders; name changes to `.tfvars` (gitignored) |
+
 Commit everything to `bootstrap/init`:
 ```bash
 git add .
@@ -295,11 +335,124 @@ Include a note if estimated cost exceeds 50% of cap — suggest the human consid
 
 Apply IaC for dev baseline only. Do not provision staging or prod.
 
+**Azure:**
 ```bash
-cd infra/<cloud>/dev
-terraform init && terraform apply -auto-approve
-# or: az deployment sub create ... (Azure Bicep)
+RESOURCE_GROUP="<project_name>-dev-rg"
+az group create --name "$RESOURCE_GROUP" --location "<region>"
+az deployment group create \
+  --name main \
+  --resource-group "$RESOURCE_GROUP" \
+  --template-file infra/azure/dev/main.bicep \
+  --parameters infra/azure/dev/main.bicepparam
 ```
+
+Capture the outputs for later steps:
+```bash
+KV_NAME=$(az deployment group show \
+  --resource-group "$RESOURCE_GROUP" --name main \
+  --query properties.outputs.keyVaultName.value -o tsv)
+REGISTRY=$(az deployment group show \
+  --resource-group "$RESOURCE_GROUP" --name main \
+  --query properties.outputs.registryLoginServer.value -o tsv)
+```
+
+**GCP:**
+```bash
+cd infra/gcp/dev
+terraform init
+terraform apply -auto-approve
+
+REGISTRY=$(terraform output -raw artifact_registry_url)
+CLOUD_RUN_URL=$(terraform output -raw cloud_run_url)
+```
+
+---
+
+**Auth provider setup (runs after IaC apply)**
+
+> ⛔ Do not proceed if IaC apply failed. Auth setup writes secrets into the provisioned secrets store.
+
+**Azure — Azure AD B2C:**
+
+```bash
+# 0. Capture the current subscription ID (needed for resource ID paths below)
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+
+# 1. Create a B2C tenant (requires Contributor on the subscription)
+#    B2C is a separate tenant type; it cannot be created via Bicep.
+az resource create \
+  --resource-type Microsoft.AzureActiveDirectory/b2cDirectories \
+  --resource-group "$RESOURCE_GROUP" \
+  --api-version 2021-04-01 \
+  --name "<project_name>b2c.onmicrosoft.com" \
+  --is-full-object \
+  --properties '{
+    "location": "United States",
+    "sku": { "name": "PremiumP1", "tier": "A0" },
+    "properties": {
+      "createTenantProperties": {
+        "displayName": "<project_name>",
+        "countryCode": "US"
+      }
+    }
+  }'
+
+# 2. Record the B2C tenant ID (from the response or portal)
+B2C_TENANT_ID=$(az resource show \
+  --ids "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.AzureActiveDirectory/b2cDirectories/<project_name>b2c.onmicrosoft.com" \
+  --query properties.tenantId -o tsv)
+
+# 3. Switch to the B2C tenant and register the API application
+az login --tenant "$B2C_TENANT_ID" --allow-no-subscriptions
+
+APP_CLIENT_ID=$(az ad app create \
+  --display-name "<project_name>-api" \
+  --sign-in-audience AzureADMyOrg \
+  --query appId -o tsv)
+
+# 4. Store credentials in Key Vault (switch back to main tenant first)
+az login
+az keyvault secret set --vault-name "$KV_NAME" --name "B2C-TENANT-ID"  --value "$B2C_TENANT_ID"
+az keyvault secret set --vault-name "$KV_NAME" --name "B2C-CLIENT-ID"  --value "$APP_CLIENT_ID"
+az keyvault secret set --vault-name "$KV_NAME" --name "B2C-TENANT-NAME" --value "<project_name>b2c.onmicrosoft.com"
+```
+
+**GCP — Firebase Auth:**
+
+```bash
+# 1. Add Firebase to the GCP project
+#    (firebase-tools is pre-installed in the dev container)
+firebase projects:addfirebase "$GCP_PROJECT_ID"
+
+# 2. Enable Email/Password sign-in (most common starting point)
+#    Firebase auth providers are not yet configurable via CLI alone —
+#    open the Firebase console and enable providers under Authentication → Sign-in method.
+#    Minimum required: Email/Password.
+echo "ACTION REQUIRED: Enable auth providers in Firebase console:"
+echo "  https://console.firebase.google.com/project/$GCP_PROJECT_ID/authentication/providers"
+
+# 3. Create a Web app and capture the SDK config
+FIREBASE_APP_ID=$(firebase apps:create WEB "<project_name>-web" \
+  --project "$GCP_PROJECT_ID" --json \
+  | jq -r '.result.appId')
+
+firebase apps:sdkconfig WEB "$FIREBASE_APP_ID" \
+  --project "$GCP_PROJECT_ID" --json \
+  | jq '.result.sdkConfig' > /tmp/firebase-config.json
+
+# 4. Store the SDK config in Secret Manager
+gcloud secrets versions add "<project_name>-dev-config" \
+  --data-file=/tmp/firebase-config.json \
+  --project "$GCP_PROJECT_ID"
+
+rm /tmp/firebase-config.json   # never leave secrets on disk
+
+echo "Firebase Auth configured. App ID: $FIREBASE_APP_ID"
+```
+
+> The Firebase Admin SDK running on Cloud Run uses the service account's Application Default Credentials (ADC) — no explicit secret is needed for server-side JWT validation.
+
+---
 
 Tag all resources:
 ```

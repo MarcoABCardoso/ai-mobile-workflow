@@ -1,0 +1,13 @@
+# infra/gcp/dev/terraform.tfvars.example
+# Bootstrap skill substitutes {{placeholders}} from bootstrap-seed.json,
+# then saves the result as terraform.tfvars (gitignored — no secrets here,
+# but we gitignore *.tfvars by convention to prevent accidental secret commits).
+#
+# To apply manually:
+#   cp terraform.tfvars.example terraform.tfvars   # then fill in values
+#   terraform init && terraform apply
+
+project_id   = "{{subscription_id}}"
+project_name = "{{project_name}}"
+region       = "{{region}}"
+github_org   = "{{github_org}}"
