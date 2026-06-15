@@ -1,7 +1,7 @@
 # Skill: Project Bootstrap
 
 **Invocation:** `claude bootstrap`
-**Version:** 0.6
+**Version:** 0.8
 **Scope:** Greenfield projects only. Do not run against an existing repository.
 
 ---
@@ -20,8 +20,10 @@ AI role again →  provision cloud resources (if not deferred), open PR
 
 The script lives in the workflow repo: `scripts/bootstrap.js`. It reads the seed, writes every file, and commits — no AI judgement involved in file generation.
 
+> **HARD RULE — never scaffold files manually.** If `bootstrap.js` fails, diagnose the error, fix the seed or the script, and re-run. Do not fall back to writing project files by hand. The script is the single source of truth for what a scaffolded project looks like.
+
 **Prerequisites the human must complete before starting the session:**
-1. Create an empty GitHub repository for the new project
+1. Create an empty GitHub repository for the new project (the script creates the `main` branch automatically from an empty init commit)
 2. Start a Claude Code session scoped to that repository
 3. Invoke `claude bootstrap`
 
@@ -242,6 +244,20 @@ git push origin bootstrap/init
 
 ### Step 5 — Open bootstrap PR
 
+The script creates `main` locally (empty init commit) if no branches exist yet, then branches from it. Push both branches before opening the PR:
+
+```bash
+git push origin main              # establishes main on the remote (PR base)
+git push -u origin bootstrap/init
+```
+
+**GCP only — verify terraform.tfvars was not committed:**
+The script writes `infra/gcp/dev/terraform.tfvars` (which contains real values from the seed such as `project_id`) and adds it to `.gitignore` before `git add .` runs. Git should therefore never stage it. Confirm with:
+```bash
+git show HEAD -- infra/gcp/dev/terraform.tfvars  # must return nothing
+```
+If it was committed, remove it: `git rm --cached infra/gcp/dev/terraform.tfvars && git commit -m "fix: untrack terraform.tfvars"`.
+
 ```bash
 git push -u origin bootstrap/init
 
@@ -288,7 +304,9 @@ Cloud:       <cloud> dev environment provisioned  (or: deferred — see PROVISIO
 | Workflow repo clone fails | Report error; check network and `workflow_repo` in seed; halt |
 | Wrong session repo | Confirm `git remote get-url origin` matches `<org>/<project_name>`; if not, tell the human to restart the session on the correct repo |
 | Seed validation fails (script exit 1) | Read the script's error output; fix the seed field; re-run the script |
-| Script fails mid-way | The script is idempotent within a run — fix the error and re-run from the start |
+| Script fails mid-way | Delete the bootstrap/init branch (`git branch -D bootstrap/init`), fix the error, and re-run the script from scratch |
+| `gh pr create` returns 422 | `main` wasn't pushed to the remote before opening the PR — run `git push origin main` first |
+| `terraform.tfvars` appears in commit | Run `git rm --cached infra/gcp/dev/terraform.tfvars && git commit -m "fix: untrack terraform.tfvars"` |
 | Cloud auth fails | Show auth steps for chosen cloud; halt |
 | IaC apply fails | Display the Terraform/Bicep error; propose fix; wait for human approval before retrying |
 | Any unexpected error | Halt; do not attempt partial fixes; report state clearly |
@@ -304,7 +322,9 @@ Cloud:       <cloud> dev environment provisioned  (or: deferred — see PROVISIO
 
 ---
 
-*Skill version: 0.6 | Workflow version: 0.9 | Last updated: 2026-06-15*
+*Skill version: 0.8 | Workflow version: 0.9 | Last updated: 2026-06-15*
+*Changes in 0.8: script now creates `main` branch (empty init commit) automatically when no branches exist, then branches `bootstrap/init` from it — no more manual guard needed in Step 5; push instructions updated to push both `main` and `bootstrap/init`.*
+*Changes in 0.7: pilot feedback — explicit "never scaffold manually" rule in intro; Step 5 documented empty-main-branch guard and terraform.tfvars verification; `.gitignore` moved to first file written in bootstrap.js.*
 *Changes in 0.6: AI role reduced to seed collection only; all file generation moved to `scripts/bootstrap.js`; BOOTSTRAP_SKILL.md no longer contains inline file content.*
 *Changes in 0.5: session-on-target-repo invocation model; Step 0 clones workflow repo locally.*
 *Changes in 0.4: user-creates-repo-upfront flow; agent prompts human with exact repo settings.*
