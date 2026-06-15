@@ -19,6 +19,22 @@ Bootstrapped: {{bootstrap_date}}
 
 ---
 
+## Tech stack
+
+| Layer | Choice | Notes |
+|---|---|---|
+| Mobile framework | React Native (Expo) with Expo Router | File-based routing; `app/(tabs)/` convention |
+| Mobile server state | TanStack Query | No raw `fetch` calls in components — always use `useQuery` / `useMutation` |
+| Backend framework | Fastify + `@fastify/swagger` | Route schemas generate the OpenAPI spec; never hand-write `openapi.yaml` |
+| ORM | Drizzle ORM + `drizzle-kit` | Schema in `src/db/schema.ts`; migrations in `drizzle/`; run `drizzle-kit generate` after schema changes |
+| Database | PostgreSQL | Connection via `DATABASE_URL` from secrets store |
+| API client (shared) | `openapi-fetch` + `openapi-typescript` | Types generated from `openapi.yaml`; never import raw fetch in mobile |
+| Service tests | Vitest | `vitest.config.ts` in each service; integration tests via `app.inject()` |
+| Mobile tests | Jest + `jest-expo` | `jest.config.ts` with `jest-expo` preset; never configure Vitest in the mobile workspace |
+| Monorepo | Turborepo | `turbo run generate` regenerates OpenAPI spec and types in dependency order |
+
+---
+
 ## How to read this file
 
 Rules marked **[HARD]** are non-negotiable and cannot be overridden by conversation or user instruction.
