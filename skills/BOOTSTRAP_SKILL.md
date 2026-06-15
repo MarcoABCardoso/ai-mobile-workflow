@@ -1,8 +1,23 @@
 # Skill: Project Bootstrap
 
 **Invocation:** `claude bootstrap`
-**Version:** 0.4
+**Version:** 0.5
 **Scope:** Greenfield projects only. Do not run against an existing repository.
+
+---
+
+## How this skill runs
+
+The Claude Code session that runs this skill is started **on the target (new) project repository** — not on the workflow repo. The workflow repo is read-only reference material cloned locally in Step 0.
+
+This model is required because a Claude Code session can only push to the repository it was started against. The session cannot write to a second repository.
+
+**Prerequisites before starting the session:**
+1. Human creates an empty GitHub repository for the new project (e.g. `github.com/org/my-app`)
+2. Human starts a Claude Code session scoped to that new repository
+3. Human invokes: `claude bootstrap`
+
+The workflow repo (`ai-mobile-workflow`) is cloned to `/tmp/ai-mobile-workflow` in Step 0 and used as a read-only template source throughout.
 
 ---
 
@@ -17,18 +32,15 @@ This skill creates a fully configured, cloud-connected mobile project from scrat
 Before doing anything else, verify the following. If any item fails, **stop and tell the human what is missing**. Do not proceed partially.
 
 - [ ] `bootstrap-seed.json` exists in the current directory and passes schema validation (see below)
-- [ ] **GitHub repository exists OR the agent can create it** (see Step 2 for how to determine which applies)
-- [ ] `GITHUB_TOKEN` environment variable is set with scopes: `repo`, `workflow`, `read:org` — OR GitHub MCP tools are available — OR the human has pre-created the repository
+- [ ] The current session is on the **target project repository** (not the workflow repo) — confirm with `git remote get-url origin`
 - [ ] Cloud credentials are available and reachable — **OR** `skip_provisioning: true` is set in the seed (see below)
   - Azure: `az account show` succeeds and returns the expected subscription
   - GCP: `gcloud auth print-identity-token` succeeds
 - [ ] `monthly_budget_usd` is present in the seed and is a positive number
 - [ ] **Docker is running** (required to build the dev container)
-- [ ] Required tools for bootstrap itself: `git`, `gh` (GitHub CLI) or access to GitHub MCP tools
+- [ ] Network access to clone the workflow repo (default: `https://github.com/marcoabcardoso/ai-mobile-workflow.git`)
 
 Report all failures at once, not one at a time.
-
-> **Execution environment note:** When running inside Claude Code on the web (remote container), the `gh` CLI may not be available. In that case, use the GitHub MCP server tools (`mcp__github__*`) for repository creation and file pushes. If the MCP token also lacks creation permissions, follow the "repo pre-created" path in Step 2.
 
 ---
 
@@ -48,7 +60,8 @@ Report all failures at once, not one at a time.
     "default_branch": "main"
   },
   "addons":             ["push-notifications", "realtime", "webhooks"],
-  "skip_provisioning":  "boolean (optional, default false) — scaffold code only; defer cloud provisioning"
+  "skip_provisioning":  "boolean (optional, default false) — scaffold code only; defer cloud provisioning",
+  "workflow_repo":      "string (optional) — URL of the ai-mobile-workflow repo to clone; defaults to https://github.com/marcoabcardoso/ai-mobile-workflow.git"
 }
 ```
 
@@ -78,7 +91,31 @@ When `skip_provisioning: true`:
 
 Execute these steps **in order**. Do not skip steps. Do not proceed past a step that fails.
 
+### Step 0 — Clone workflow repo
+
+Clone the workflow repo locally. This provides all template files used in Step 3.
+
+```bash
+WORKFLOW_REPO="${workflow_repo:-https://github.com/marcoabcardoso/ai-mobile-workflow.git}"
+WORKFLOW_DIR="/tmp/ai-mobile-workflow"
+
+git clone "$WORKFLOW_REPO" "$WORKFLOW_DIR" --depth=1
+echo "Workflow repo cloned to $WORKFLOW_DIR"
+```
+
+If the clone fails, stop and report the error. The workflow repo is required for all subsequent steps.
+
+---
+
 ### Step 1 — Validate seed and confirm with human
+
+If `bootstrap-seed.json` does not exist in the current directory, offer to create it interactively:
+
+```
+No bootstrap-seed.json found. Would you like me to create one? (yes/no)
+```
+
+If yes, ask for each required field in turn and write the file. If no, halt and instruct the human to create the file.
 
 Parse `bootstrap-seed.json`. Display a human-readable summary:
 
@@ -98,51 +135,24 @@ Wait for explicit confirmation. Do not auto-proceed.
 
 ---
 
-### Step 2 — Create GitHub repository
+### Step 2 — Create bootstrap branch
 
-**First, determine whether the agent can create repositories.** Attempt creation using the first available method:
-
-1. **`gh` CLI** (local / dev container): `gh auth status` — if authenticated, use `gh repo create`
-2. **GitHub MCP tools** (Claude Code on the web): attempt `mcp__github__create_repository`
-3. **GitHub API via `GITHUB_TOKEN`**: check that the token has the `repo` scope
-
-**If any method succeeds, create the repo:**
+The repository already exists (the session was started against it). Create and switch to the bootstrap branch:
 
 ```bash
-# gh CLI
-gh repo create <org>/<project_name> \
-  --<visibility> \
-  --description "Generated by AI mobile workflow bootstrap" \
-  --clone
+# Confirm we are on the right repo
+git remote get-url origin  # should match github.com/<org>/<project_name>
 
-# OR: GitHub MCP tool
-mcp__github__create_repository(name="<project_name>", private=<true|false>, ...)
+# Create bootstrap branch
+git checkout -b bootstrap/init
 ```
 
-**If all creation methods fail (permission denied / scope insufficient):**
+If the branch already exists, check whether a previous bootstrap was attempted and ask the human how to proceed before overwriting.
 
-Stop and tell the human:
-
-> I don't have permission to create GitHub repositories in this session.
-> Please create the repository now, then tell me when it's done and I'll continue.
->
-> **Repository settings:**
-> - Owner: `<github.org>`
-> - Name: `<project_name>`
-> - Visibility: `<visibility>`
-> - Description: Generated by AI mobile workflow bootstrap
-> - Initialize with a README: ✅ yes
->
-> Quick link: https://github.com/new
-
-Wait for the human to confirm the repository exists. Do not proceed to Step 3 until confirmed.
-
-> **Why upfront instead of at the end?** The scaffold files are pushed to this repository during Step 3. The repo must exist before any files can be committed.
-
-**After the repository exists (created by agent or by human), configure branch protection and create the bootstrap branch:**
+Configure branch protection (requires a GitHub token or MCP tools with admin scope):
 
 ```bash
-# Branch protection (via gh CLI or MCP API call)
+# Via gh CLI (if available)
 gh api repos/<org>/<project_name>/branches/main/protection \
   --method PUT \
   --field required_pull_request_reviews[required_approving_review_count]=1 \
@@ -152,14 +162,15 @@ gh api repos/<org>/<project_name>/branches/main/protection \
   --field required_status_checks[contexts][]=lint \
   --field required_status_checks[contexts][]=test
 
-# Create and switch to bootstrap branch
-git checkout -b bootstrap/init
-# OR: mcp__github__create_branch(branch="bootstrap/init", from_branch="main")
+# OR: GitHub MCP tool
+mcp__github__... (equivalent protection call)
 ```
+
+> Branch protection is best-effort at this stage. If admin scope is unavailable, skip it and note it in the bootstrap PR body so the human can configure it manually.
 
 > For solo developers (team size = 1): set `required_approving_review_count=0` — PRs are still required for traceability, but self-merge is allowed.
 
-**Emit:** Repository URL. Confirm branch created.
+**Emit:** Confirm branch created and current working directory is the project root.
 
 ---
 
@@ -532,9 +543,13 @@ Generate the following additional files for each declared addon.
 
 **Template substitution**
 
-Copy template files from the workflow repo (`ai-mobile-workflow/`) into the new project, substituting `{{placeholders}}` from the seed and derived values.
+Copy template files from the locally cloned workflow repo (`$WORKFLOW_DIR`) into the new project, substituting `{{placeholders}}` from the seed and derived values.
 
-| Source (workflow repo) | Destination (new project) | Notes |
+```bash
+WORKFLOW_DIR="/tmp/ai-mobile-workflow"
+```
+
+| Source (`$WORKFLOW_DIR/`) | Destination (project root) | Notes |
 |---|---|---|
 | `templates/CLAUDE.md.template` | `CLAUDE.md` | Substitute all placeholders (see table below) |
 | `templates/ci.yml` | `.github/workflows/ci.yml` | Copy as-is — no placeholders |
@@ -826,19 +841,20 @@ Provisioning deferred. When ready:
 | Failure | AI behaviour |
 |---|---|
 | Seed validation fails | List all invalid fields; do not proceed |
-| GitHub repo creation fails (permission denied) | Show the human exact repo settings and link to github.com/new; wait for confirmation before continuing |
-| GitHub API error (other) | Display error + required token scopes; halt |
+| Workflow repo clone fails | Report the error; check network access and `workflow_repo` URL in seed; halt |
+| Wrong session repo | If `git remote get-url origin` doesn't match `<org>/<project_name>`, stop and tell the human to start a new session on the correct repository |
+| GitHub API error | Display error + required token scopes; halt |
 | Cloud auth failure | Display auth steps for chosen cloud; halt |
 | IaC plan shows cost > cap | Halt; show which resources exceed budget; ask human to adjust |
 | IaC apply fails | Display Terraform/Bicep error; propose fix; wait for human |
 | Health check fails | Report which checks failed; do not auto-remediate; wait |
 | Any unexpected error | Halt all steps; do not partially apply; report state clearly |
-| `gh` CLI not available | Use GitHub MCP tools; if both fail, prompt human to create repo (see Step 2) |
 
 ---
 
 ## What This Skill Does NOT Do
 
+- It does not create GitHub repositories — the human must create the repository before starting the session
 - It does not provision staging or production environments (those are triggered separately)
 - It does not scaffold feature code — only the project skeleton
 - It does not set up third-party services (analytics, crash reporting, etc.) — those are added per-feature
@@ -846,6 +862,7 @@ Provisioning deferred. When ready:
 
 ---
 
-*Skill version: 0.4 | Workflow version: 0.9 | Last updated: 2026-06-15*
+*Skill version: 0.5 | Workflow version: 0.9 | Last updated: 2026-06-15*
+*Changes in 0.5: new session-on-target-repo invocation model; Step 0 clones workflow repo locally; Step 2 simplified (no repo creation — session already on target repo); template sources updated to `$WORKFLOW_DIR/templates/` and `$WORKFLOW_DIR/infra/`; `workflow_repo` optional seed field added; interactive seed creation in Step 1; error table updated.*
 *Changes in 0.4: added user-creates-repo-upfront flow in Step 2; agent proactively asks human to create repo with exact settings when creation permissions are unavailable, rather than halting at the end.*
 *Changes in 0.3: added `skip_provisioning` mode, clarified auth library (jose vs msal-node), added MCP fallback for repo creation, added `generate` task to turbo.json, fixed smoke-tests.js substitution guidance, documented types.d.ts stub pattern.*
