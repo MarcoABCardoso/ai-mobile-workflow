@@ -83,12 +83,43 @@ Work in this order, committing at each logical boundary:
 
 1. **Shared types first** — any new types, API client methods, or contracts go in `/shared` before any consumer touches them. This prevents import errors mid-implementation.
 
-2. **Backend service(s)** — implement the API endpoint(s), business logic, and data layer. If auth is required, use the project's auth middleware (derived from `bootstrap.json` → `cloud`):
-   - Azure: validate Azure AD B2C JWT via `@azure/msal-node` middleware
-   - GCP: validate Firebase Auth JWT via `firebase-admin` middleware
+2. **Backend service(s)** — implement the API endpoint(s), business logic, and data layer.
+
+   **Route schema first.** Define the Fastify route schema (request body, params, response) before writing handler logic. The schema drives the generated OpenAPI spec, which in turn drives the shared types.
+
+   ```typescript
+   // Define the shape — Fastify validates and serialises from this
+   const schema = {
+     body: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
+     response: { 201: { type: 'object', properties: { id: { type: 'string' } } } },
+   } as const
+
+   app.post('/items', { schema }, async (req, reply) => {
+     const item = await db.insert(items).values({ name: req.body.name }).returning()
+     return reply.status(201).send(item[0])
+   })
+   ```
+
+   **After each new route:** run `npm run generate:openapi` then `turbo run generate --filter=shared/api-client` to update `openapi.yaml` and the shared TypeScript types.
+
+   **Data layer:** use Drizzle ORM. Define new tables in `src/db/schema.ts`, then run `npx drizzle-kit generate` to produce the migration SQL and commit it.
+
+   **Auth:** if the route requires authentication, add the auth hook from `src/plugins/auth.ts`:
+   - Azure: validate Azure AD B2C JWT via `@azure/msal-node` — use the pre-built plugin, not custom token parsing
+   - GCP: validate Firebase Auth JWT via `firebase-admin` — use `firebase-admin.auth().verifyIdToken()`
    Never implement custom auth logic. Always use the provider SDK.
 
-3. **Mobile screens and components** — implement UI consuming the updated shared API client.
+3. **Mobile screens and components** — implement UI consuming the updated shared API client via TanStack Query:
+
+   ```typescript
+   // In a screen or hook — never use fetch/apiClient directly in a component
+   const { data, isLoading, error } = useQuery({
+     queryKey: ['items'],
+     queryFn: () => apiClient.GET('/items'),
+   })
+   ```
+
+   Place the screen file at the correct Expo Router path (e.g. `mobile/app/(tabs)/items.tsx`). Create the file — no navigator configuration needed.
 
 4. **Wiring** — connect mobile to backend via the shared API client; ensure environment config (`.env`) is updated if new endpoints were added.
 
@@ -110,41 +141,67 @@ feat(shared): add CreateItemRequest type
 
 Tests are written after the implementation skeleton exists but before the final implementation is complete (not as an afterthought). Each test file lives alongside the code it tests.
 
-#### Unit tests
-
-For each new function, class, or hook with meaningful logic:
+#### Unit tests (services — Vitest)
 
 ```typescript
-// services/api/src/items/items.service.test.ts
-describe('ItemsService', () => {
-  it('should return paginated items for authenticated user', ...)
-  it('should throw 403 if user does not own the resource', ...)
-  it('should handle empty result set gracefully', ...)
+// services/<name>/src/items/items.service.test.ts
+import { describe, it, expect, vi } from 'vitest'
+import { getItems } from './items.service'
+
+describe('getItems', () => {
+  it('returns paginated items for the authenticated user', async () => { ... })
+  it('throws 403 if the user does not own the resource', async () => { ... })
+  it('handles an empty result set without error', async () => { ... })
 })
 ```
 
 Run after writing:
 ```bash
-turbo test --filter=<service-name>
+turbo run test --filter=<service-name>
 ```
 
 Iterate until green. Do not proceed with failing unit tests.
 
-#### Integration tests
+#### Integration tests (services — Vitest + Fastify inject)
 
-For each new API endpoint:
+Use Fastify's `app.inject()` — no running server needed, no ports opened:
+
 ```typescript
-// services/api/tests/integration/items.test.ts
+// services/<name>/tests/integration/items.test.ts
+import { describe, it, expect, beforeAll } from 'vitest'
+import { app } from '../../src/index'
+
 describe('POST /items', () => {
-  it('returns 201 and created item with valid auth token', ...)
-  it('returns 401 with missing auth token', ...)
-  it('returns 422 with invalid payload', ...)
+  beforeAll(() => app.ready())
+
+  it('returns 201 with valid auth token', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/items',
+      headers: { authorization: 'Bearer <test-token>' },
+      payload: { name: 'widget' },
+    })
+    expect(res.statusCode).toBe(201)
+    expect(res.json()).toMatchObject({ id: expect.any(String) })
+  })
+
+  it('returns 401 with missing auth token', async () => {
+    const res = await app.inject({ method: 'POST', url: '/items', payload: { name: 'x' } })
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('returns 422 with invalid payload', async () => {
+    const res = await app.inject({
+      method: 'POST', url: '/items',
+      headers: { authorization: 'Bearer <test-token>' },
+      payload: {},
+    })
+    expect(res.statusCode).toBe(422)
+  })
 })
 ```
 
-Run against a local instance of the service (start it in the background for the test run):
 ```bash
-turbo test:integration --filter=<service-name>
+turbo run test:integration --filter=<service-name>
 ```
 
 #### Mobile component tests
