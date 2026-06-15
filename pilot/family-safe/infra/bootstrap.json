@@ -1,0 +1,14 @@
+{
+  "project_name": "family-safe",
+  "cloud": "azure",
+  "region": "eastus",
+  "services": ["api"],
+  "addons": ["push-notifications", "realtime"],
+  "github": {
+    "org": "marcoabcardoso",
+    "visibility": "private",
+    "default_branch": "main"
+  },
+  "bootstrapped_at": "2026-06-15",
+  "workflow_version": "0.8"
+}

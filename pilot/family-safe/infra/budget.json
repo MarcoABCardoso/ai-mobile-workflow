@@ -1,0 +1,8 @@
+{
+  "currency": "USD",
+  "monthly_cap": 50,
+  "alert_thresholds": [50, 75, 90],
+  "hard_stop_at_percent": 100,
+  "environment": "development",
+  "owner": "marcoabcardoso"
+}

@@ -1,0 +1,162 @@
+# .github/workflows/deploy-prod.yml
+# Runs on merge to main. Deploys all services to production,
+# then runs smoke tests. Rolls back automatically on failure.
+
+name: Deploy to production
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+env:
+  PROJECT_NAME: "family-safe"
+  REGISTRY: ""  # TODO: fill in after provisioning — ACR login server from infra/azure/dev/main.bicep output
+  AZURE_RESOURCE_GROUP: "family-safe-prod-rg"
+
+jobs:
+
+  test:
+    name: Full test suite (merged)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx turbo run test lint
+      - name: Integration tests
+        run: npx turbo run test:integration
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+  build:
+    name: Build & push images
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate image tag
+        id: tag
+        run: echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - run: az acr login --name ${{ env.REGISTRY }}
+      - name: Build and push all service images
+        run: |
+          for SERVICE in services/*/; do
+            SERVICE_NAME=$(basename $SERVICE)
+            IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_NAME }}-${SERVICE_NAME}"
+            TAG="${{ steps.tag.outputs.tag }}"
+            docker build --tag "$IMAGE:$TAG" --tag "$IMAGE:latest" --label "git-sha=$TAG" --label "ai-managed=true" "$SERVICE"
+            docker push "$IMAGE:$TAG"
+            docker push "$IMAGE:latest"
+          done
+
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: build
+    environment: production
+    outputs:
+      previous-revision: ${{ steps.get-revision.outputs.revision }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Record current revision (for rollback)
+        id: get-revision
+        run: |
+          REVISION=$(az containerapp revision list \
+            --name ${{ env.PROJECT_NAME }}-api \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --query "[?properties.active].name | [0]" \
+            --output tsv)
+          echo "revision=$REVISION" >> $GITHUB_OUTPUT
+      - name: Deploy all services
+        run: |
+          IMAGE_TAG="${{ needs.build.outputs.image-tag }}"
+          for SERVICE in services/*/; do
+            SERVICE_NAME=$(basename $SERVICE)
+            IMAGE="${{ env.REGISTRY }}/${{ env.PROJECT_NAME }}-${SERVICE_NAME}:${IMAGE_TAG}"
+            az containerapp update \
+              --name "${{ env.PROJECT_NAME }}-${SERVICE_NAME}" \
+              --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
+              --image "$IMAGE"
+          done
+
+  smoke-tests:
+    name: Smoke tests (production)
+    runs-on: ubuntu-latest
+    needs: deploy
+    outputs:
+      passed: ${{ steps.run.outputs.passed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Run smoke tests
+        id: run
+        env:
+          PRODUCTION_URL: ${{ secrets.PRODUCTION_URL }}
+          SMOKE_TEST_TOKEN: ${{ secrets.SMOKE_TEST_TOKEN }}
+          ANH_CONNECTION_STRING: ${{ secrets.ANH_CONNECTION_STRING }}
+          ANH_HUB_NAME: ${{ secrets.ANH_HUB_NAME }}
+        run: |
+          node scripts/smoke-tests.js
+          echo "passed=true" >> $GITHUB_OUTPUT
+
+  rollback:
+    name: Rollback production
+    runs-on: ubuntu-latest
+    needs: [deploy, smoke-tests]
+    if: ${{ needs.smoke-tests.outputs.passed != 'true' }}
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Restore previous revision
+        run: |
+          PREVIOUS="${{ needs.deploy.outputs.previous-revision }}"
+          for SERVICE in services/*/; do
+            SERVICE_NAME=$(basename $SERVICE)
+            az containerapp ingress traffic set \
+              --name "${{ env.PROJECT_NAME }}-${SERVICE_NAME}" \
+              --resource-group "${{ env.AZURE_RESOURCE_GROUP }}" \
+              --revision-weight "$PREVIOUS=100"
+          done
+      - name: Alert on rollback
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Production rollback triggered — ${{ github.sha }}`,
+              body: [
+                '## Production deployment rolled back',
+                '',
+                `**Commit:** ${{ github.sha }}`,
+                `**Triggered by:** Smoke test failure after deploy`,
+                `**Rolled back to:** ${{ needs.deploy.outputs.previous-revision }}`,
+                '',
+                `**Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`,
+              ].join('\n'),
+              labels: ['production', 'rollback', 'urgent'],
+            });

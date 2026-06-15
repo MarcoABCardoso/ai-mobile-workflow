@@ -1,0 +1,182 @@
+# .github/workflows/ci.yml
+# Runs on every push to a feature branch and on PRs targeting main.
+# All jobs must pass before a PR can be merged.
+
+name: CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx turbo run lint
+      - run: npx turbo run build
+
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx turbo run test
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: '**/coverage/**'
+          retention-days: 7
+
+  integration-tests:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    needs: lint
+    env:
+      NODE_ENV: test
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx turbo run test:integration
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: '**/test-results/**'
+          retention-days: 7
+
+  component-tests:
+    name: Component tests (mobile)
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx turbo run test --filter=mobile
+
+  expo-web-preview:
+    name: Expo web preview
+    runs-on: ubuntu-latest
+    needs: [unit-tests, component-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Start Expo web
+        run: cd mobile && npx expo start --web --non-interactive &
+      - name: Wait for Expo web
+        run: npx wait-on http://localhost:8081 --timeout 60000
+      - name: Capture screenshots
+        run: |
+          mkdir -p .ai-artifacts/screenshots
+          npx playwright screenshot http://localhost:8081 .ai-artifacts/screenshots/web-home.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: expo-web-screenshots
+          path: .ai-artifacts/screenshots/
+          retention-days: 14
+
+  android-preview:
+    name: Android preview
+    runs-on: ubuntu-latest
+    needs: [unit-tests, component-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: Nexus 6
+          script: |
+            npm ci
+            cd mobile && npx expo run:android
+            sleep 30
+            mkdir -p .ai-artifacts/screenshots
+            adb exec-out screencap -p > .ai-artifacts/screenshots/android-preview.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-screenshots
+          path: .ai-artifacts/screenshots/android-preview.png
+          retention-days: 14
+
+  ios-preview:
+    name: iOS preview
+    runs-on: macos-latest
+    needs: [unit-tests, component-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: expo/expo-github-action@v8
+        with:
+          expo-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - run: npm ci
+      - name: Build and launch iOS
+        run: cd mobile && npx expo run:ios --device "iPhone 15"
+      - name: Wait for app to load
+        run: sleep 30
+      - name: Capture screenshot
+        run: |
+          mkdir -p .ai-artifacts/screenshots
+          xcrun simctl io booted screenshot .ai-artifacts/screenshots/ios-preview.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-screenshots
+          path: .ai-artifacts/screenshots/ios-preview.png
+          retention-days: 14
