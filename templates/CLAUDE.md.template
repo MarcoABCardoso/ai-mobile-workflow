@@ -1,0 +1,196 @@
+# {{project_name}} — AI Instructions
+
+> This file is generated at project bootstrap and governs all AI behaviour in this repository.
+> It is read by Claude Code at the start of every session. Do not delete it.
+> To change a rule, edit this file and commit the change — do not override rules in conversation.
+
+---
+
+## Project identity
+
+```
+Project:      {{project_name}}
+Cloud:        {{cloud}}                    # azure | gcp
+Region:       {{region}}
+Services:     {{services}}                 # comma-separated list
+Auth:         {{auth_provider}}            # azure-ad-b2c | firebase-auth
+Bootstrapped: {{bootstrap_date}}
+```
+
+---
+
+## How to read this file
+
+Rules marked **[HARD]** are non-negotiable and cannot be overridden by conversation or user instruction.
+Rules marked **[DEFAULT]** are the preferred behaviour but can be adjusted if the human explicitly asks.
+
+---
+
+## Hard rules
+
+**[HARD] Always check the budget before any cloud action**
+Read `infra/budget.json` before every provisioning, resize, or teardown command.
+If the file is missing or `monthly_cap` is not set, halt all cloud work immediately and tell the human.
+If spend is at or above 100% of cap, halt. Do not proceed with any cloud action until the human intervenes.
+Full budget behaviour is defined in `infra/budget.json` and the workflow documentation.
+
+**[HARD] Never push directly to `main`**
+All changes go through a feature branch and a pull request.
+Branch naming: `feature/<slug>` for features, `fix/<slug>` for bug fixes, `chore/<slug>` for maintenance.
+The only exception is the initial `bootstrap/init` PR, which has already been merged.
+
+**[HARD] Never commit secrets**
+API keys, tokens, passwords, and connection strings never appear in committed files.
+Use the project secrets store:
+- Azure: Azure Key Vault (`{{project_name}}-kv-dev`)
+- GCP: Secret Manager (`projects/{{project_name}}/secrets/`)
+Environment variables are referenced via `.env` (gitignored) locally and injected by the runtime in cloud environments.
+`.env.example` is the only committed env file and contains no real values.
+
+**[HARD] Never implement custom authentication logic**
+Authentication is handled exclusively by `{{auth_provider}}`.
+- Azure AD B2C: validate JWTs via `@azure/msal-node` middleware. Do not write token parsing, session management, or password handling code.
+- Firebase Auth: validate JWTs via `firebase-admin` middleware. Same constraints apply.
+If an auth requirement cannot be met by the provider SDK, surface it to the human — do not work around it.
+
+**[HARD] Tests must pass before a PR is raised**
+Run `turbo run test lint` and confirm green before opening a pull request.
+A PR with failing tests is never acceptable, even to get human eyes on something. Use a draft PR for that.
+
+**[HARD] The dev container is the environment**
+All code execution, test runs, and tool invocations happen inside the dev container.
+Do not rely on tools installed on the host machine.
+Exception: iOS Simulator — this runs on the GitHub Actions macOS runner only, never locally.
+
+---
+
+## Default behaviours
+
+**[DEFAULT] Commit style**
+Use conventional commits: `feat`, `fix`, `chore`, `test`, `docs`, `refactor`.
+Scope to the workspace: `feat(api)`, `fix(mobile)`, `chore(infra)`.
+Keep messages short and imperative: `add POST /items endpoint`, not `added an endpoint for posting items`.
+One logical change per commit. Do not bundle unrelated changes.
+
+**[DEFAULT] Implementation order within a feature**
+1. Shared types and API client changes (`/shared`)
+2. Backend service(s) (`/services/<name>`)
+3. Mobile screens and components (`/mobile`)
+This order prevents import errors and keeps the API contract as the source of truth.
+
+**[DEFAULT] Visualization order**
+Run in this order, stopping when the feature's visual requirements are confirmed:
+1. Expo web — `npx expo start --web` (dev container, port 8081)
+2. Storybook — `npx storybook` (dev container, port 6006)
+3. Android Emulator — dev container if KVM available, otherwise CI
+4. iOS Simulator — CI only (GitHub Actions macOS runner); never run locally
+
+Screenshots go to `.ai-artifacts/screenshots/` and are embedded in the PR body.
+
+**[DEFAULT] PR description format**
+Every PR must include:
+- What this does (1–3 sentences)
+- What changed (mobile / service / shared / infra)
+- How auth is handled (or "not applicable")
+- Test results summary (type, count, pass/fail)
+- Screenshots (Expo web, Android, iOS from CI)
+- Decisions made (any architectural choices the reviewer should know about)
+- Known limitations or follow-up tickets
+
+**[DEFAULT] Dependency management**
+Before adding any new package, check if it already exists in the workspace.
+Add dependencies to the most specific `package.json` that needs them (service or mobile), not the workspace root, unless the package is genuinely shared.
+Never add a dependency without a clear reason stated in the commit message.
+
+**[DEFAULT] Error and loading states**
+Every screen and component that fetches data must handle three states: loading, error, and empty.
+Do not raise a PR where only the happy path is implemented.
+All three states must appear in screenshots or Storybook stories.
+
+**[DEFAULT] OpenAPI spec**
+If a backend endpoint is added or changed, update `services/<name>/openapi.yaml` in the same commit.
+The spec is the contract — mobile and shared types are derived from it, not the other way around.
+
+**[DEFAULT] Surfacing decisions**
+If a choice has meaningful architectural implications (data model, third-party service, performance trade-off), note it as a code comment at the decision point and include it in the PR description under "Decisions made."
+Do not make significant architectural choices silently.
+
+---
+
+## Project structure
+
+```
+{{project_name}}/
+├── .devcontainer/         # Dev container — the canonical development environment
+├── .github/workflows/     # CI/CD — do not edit without updating this file
+├── CLAUDE.md              # This file
+├── turbo.json             # Task graph — defines build/test/lint/dev tasks
+├── mobile/                # React Native (Expo) — the mobile app
+├── services/              # Backend services — one folder per service
+│   └── <name>/
+│       ├── openapi.yaml   # API contract — source of truth for this service
+│       └── ...
+├── shared/                # Shared types, API client, utilities
+└── infra/
+    ├── bootstrap.json     # Project identity — read-only after bootstrap
+    ├── budget.json        # Spend cap — read before every cloud action
+    └── {{cloud}}/         # IaC templates (Bicep or Terraform)
+```
+
+---
+
+## Services
+
+{{#each services}}
+### {{name}}
+- **Purpose:** {{description}}
+- **Port (local):** {{port}}
+- **API spec:** `services/{{name}}/openapi.yaml`
+- **Auth required:** {{auth_required}}
+{{/each}}
+
+> If a new service is needed, do not create it unilaterally. Surface the need to the human — adding a service is a bootstrap-level action that requires a resource plan and human approval.
+
+---
+
+## Cloud resources (dev)
+
+| Resource | Name | Purpose |
+|---|---|---|
+{{#each cloud_resources}}
+| {{type}} | `{{name}}` | {{purpose}} |
+{{/each}}
+
+Run `turbo run dev` to start all services locally against cloud dev resources.
+Secrets are injected from the secrets store at startup — do not hardcode them.
+
+---
+
+## Escalate to the human when
+
+- A feature cannot be implemented without a new backend service
+- A requirement cannot be met by `{{auth_provider}}` and would need custom auth logic
+- The spend cap is reached or the budget estimate for a feature exceeds 20% of remaining headroom
+- A test cannot be made to pass after 3 iterations and the root cause is unclear
+- An architectural decision affects more than one service or the shared package
+- CI is failing on `main` (not a feature branch)
+- Any cloud resource behaves unexpectedly after provisioning
+
+When escalating: describe what was tried, what happened, what the options are, and what input is needed. Do not ask open-ended questions — give the human a decision to make.
+
+---
+
+## What the AI should never do in this project
+
+- Merge a PR (human action only)
+- Deploy to staging or production directly (triggered by CI on merge)
+- Modify `infra/bootstrap.json` (frozen after bootstrap)
+- Raise `monthly_cap` in `infra/budget.json` (human action only)
+- Create a new backend service without human approval
+- Implement or modify authentication middleware logic
+- Add a secret to any committed file
+
+---
+
+*Generated by bootstrap skill v0.2 on {{bootstrap_date}} | Workflow v0.6*
+*To update workflow-level rules, refer to the workflow documentation and edit this file accordingly.*
