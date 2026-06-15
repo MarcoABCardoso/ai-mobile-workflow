@@ -220,7 +220,7 @@ fi
 
 #### Level 4 — iOS Simulator (CI only — GitHub Actions macOS runner)
 
-iOS is never run locally. It is validated automatically by the CI workflow when the PR is raised. The AI waits for the CI result and reviews the uploaded iOS screenshot artifact before marking the feature complete.
+iOS is never run locally. It is validated automatically by the CI workflow when the PR is raised. The AI waits for CI to complete, then downloads and reviews the uploaded artifacts before marking the feature complete.
 
 The CI job (`ci.yml`) handles:
 ```yaml
@@ -228,14 +228,55 @@ ios-preview:
   runs-on: macos-latest
   steps:
     - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with: { node-version: 20, cache: npm }
     - uses: expo/expo-github-action@v8
+      with: { expo-version: latest, token: ${{ secrets.EXPO_TOKEN }} }
+    - run: npm ci
     - run: cd mobile && npx expo run:ios --device "iPhone 15"
-    - run: xcrun simctl io booted screenshot ios-preview.png
+    - run: sleep 30
+    - run: xcrun simctl io booted screenshot .ai-artifacts/screenshots/ios-preview.png
     - uses: actions/upload-artifact@v4
       with:
-        name: ios-preview
-        path: ios-preview.png
+        name: ios-screenshots                              # ← artifact name
+        path: .ai-artifacts/screenshots/ios-preview.png   # ← artifact path
+        retention-days: 14
 ```
+
+**Waiting for CI and retrieving artifacts:**
+
+After the PR is raised (Step 7), poll for the run and download all artifacts:
+
+```bash
+# Get the run ID for this branch
+RUN_ID=$(gh run list --branch feature/<slug> --json databaseId --jq '.[0].databaseId')
+
+# Block until all jobs complete (or fail)
+gh run watch "$RUN_ID"
+
+# Check overall conclusion
+CONCLUSION=$(gh run view "$RUN_ID" --json conclusion --jq '.conclusion')
+echo "CI result: $CONCLUSION"   # expected: success
+
+# Download artifacts — exact names must match what ci.yml uploads
+gh run download "$RUN_ID" --name ios-screenshots         --dir .ai-artifacts/screenshots/
+gh run download "$RUN_ID" --name android-screenshots     --dir .ai-artifacts/screenshots/
+gh run download "$RUN_ID" --name expo-web-screenshots    --dir .ai-artifacts/screenshots/
+gh run download "$RUN_ID" --name unit-test-results       --dir .ai-artifacts/test-results/unit/
+gh run download "$RUN_ID" --name integration-test-results --dir .ai-artifacts/test-results/integration/
+```
+
+**CI artifact reference (matches `ci.yml` exactly):**
+
+| Artifact name | Uploaded path | What to check |
+|---|---|---|
+| `ios-screenshots` | `.ai-artifacts/screenshots/ios-preview.png` | Layout on iPhone 15 — compare to feature brief |
+| `android-screenshots` | `.ai-artifacts/screenshots/android-preview.png` | Layout on Nexus 6 — compare to feature brief |
+| `expo-web-screenshots` | `.ai-artifacts/screenshots/web-home.png` | Web preview — baseline route |
+| `unit-test-results` | `**/coverage/**` | Coverage report — check for unexpected drops |
+| `integration-test-results` | `**/test-results/**` | Test output — all suites green |
+
+If CI fails: read the log (`gh run view "$RUN_ID" --log-failed`), fix the root cause, push to the branch, and wait for the new run. Iterate up to 3 times before escalating to the human.
 
 **After each level:** describe what the screenshot shows, compare to the feature brief, and self-correct before moving to the next level. All screenshots are saved to `.ai-artifacts/screenshots/` and embedded in the PR body.
 
