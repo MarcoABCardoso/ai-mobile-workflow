@@ -1,209 +1,116 @@
 // infra/azure/dev/main.bicep
-// Azure dev environment baseline — provisioned by bootstrap skill (Step 5).
-// Covers: managed identity, Key Vault, Container Registry, Container Apps.
-// Azure AD B2C is configured separately after this apply — see bootstrap skill Step 5.
+// Starter IaC template for Azure dev environment.
+// Provisions: Container Apps Environment, Container Registry, Key Vault, Notification Hubs.
+// Copy as-is to new projects — uses Bicep param declarations, no {{placeholders}}.
+// Parameters are supplied via main.bicepparam (substitute {{placeholders}} there).
 //
-// Deploy:
-//   az group create --name <project>-dev-rg --location <region>
+// Usage:
+//   az group create --name "<project>-dev-rg" --location "<region>"
 //   az deployment group create \
-//     --resource-group <project>-dev-rg \
-//     --template-file main.bicep \
-//     --parameters main.bicepparam
+//     --resource-group "<project>-dev-rg" \
+//     --template-file infra/azure/dev/main.bicep \
+//     --parameters infra/azure/dev/main.bicepparam
 
 targetScope = 'resourceGroup'
 
-@description('Project name — lowercase hyphens only, max 32 chars.')
-@maxLength(32)
+@description('Project name (lowercase, hyphens only). Used as a prefix for all resource names.')
 param projectName string
 
-@description('Azure region for all resources.')
+@description('Azure region. Defaults to the resource group location.')
 param location string = resourceGroup().location
 
-@description('GitHub org or username — stored in resource tags.')
-param githubOrg string
+@description('GitHub Actions service principal client ID (leave empty to skip role assignment).')
+param githubActionsClientId string = ''
 
-@description('Enable push notifications via Azure Notification Hubs. Set to true when push-notifications addon is declared in bootstrap-seed.json.')
-param enablePushNotifications bool = false
-
-// ─── Derived names ─────────────────────────────────────────────────────────────
-// Key Vault: max 24 chars, alphanumeric + hyphens.
-// ACR:       max 50 chars, alphanumeric only.
-var kvName  = '${take(projectName, 16)}-dev-kv'           // ≤ 23 chars
-var acrName = '${take(replace(projectName, '-', ''), 14)}devacr'  // ≤ 20 chars
-
+var envName = '${projectName}-dev'
 var tags = {
-  project: projectName
+  project:     projectName
   environment: 'dev'
-  owner: githubOrg
   'ai-managed': 'true'
 }
 
-var notifNamespaceName = '${take(projectName, 38)}-dev-nh-ns'  // ≤ 48 chars (max 50)
-
-// ─── Managed Identity ──────────────────────────────────────────────────────────
-resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
-  name: '${projectName}-dev-identity'
+// ── Container Apps Environment ──────────────────────────────────────────────────────────────────────
+resource cae 'Microsoft.App/managedEnvironments@2023-05-01' = {
+  name:     '${envName}-cae'
   location: location
-  tags: tags
-}
-
-// ─── Key Vault ─────────────────────────────────────────────────────────────────
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
-  name: kvName
-  location: location
-  tags: tags
-  properties: {
-    sku: { family: 'A', name: 'standard' }
-    tenantId: subscription().tenantId
-    enableRbacAuthorization: true    // RBAC roles instead of access policies
-    enableSoftDelete: true
-    softDeleteRetentionInDays: 7     // minimum — dev only
-    enablePurgeProtection: false     // allow hard-delete in dev
-  }
-}
-
-// Grant the managed identity read access to secrets at runtime
-resource kvSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(keyVault.id, identity.id, '4633458b-17de-408a-b874-0445c86b69e6')
-  scope: keyVault
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '4633458b-17de-408a-b874-0445c86b69e6'  // Key Vault Secrets User
-    )
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ─── Container Registry ────────────────────────────────────────────────────────
-resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
-  name: acrName
-  location: location
-  tags: tags
-  sku: { name: 'Basic' }
-  properties: {
-    adminUserEnabled: false   // use managed identity, not admin credentials
-  }
-}
-
-// Grant the managed identity permission to pull images from the registry
-resource acrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(registry.id, identity.id, '7f951dda-4ed3-4680-a7ca-43fe172d538d')
-  scope: registry
-  properties: {
-    roleDefinitionId: subscriptionResourceId(
-      'Microsoft.Authorization/roleDefinitions',
-      '7f951dda-4ed3-4680-a7ca-43fe172d538d'  // AcrPull
-    )
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-  }
-}
-
-// ─── Log Analytics (required by Container Apps) ────────────────────────────────
-resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
-  name: '${projectName}-dev-logs'
-  location: location
-  tags: tags
-  properties: {
-    sku: { name: 'PerGB2018' }
-    retentionInDays: 30
-  }
-}
-
-// ─── Container Apps Environment ────────────────────────────────────────────────
-resource appsEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
-  name: '${projectName}-dev-env'
-  location: location
-  tags: tags
+  tags:     tags
   properties: {
     appLogsConfiguration: {
-      destination: 'log-analytics'
-      logAnalyticsConfiguration: {
-        customerId: logAnalytics.properties.customerId
-        // listKeys() is evaluated at deploy time and stored in plain text in ARM
-        // deployment history — accessible to anyone with read access to the RG.
-        // Acceptable for dev; production should use Diagnostic Settings with managed
-        // identity to avoid embedding the workspace key in deployment records.
-        sharedKey: logAnalytics.listKeys().primarySharedKey
-      }
+      destination: 'azure-monitor'
     }
   }
 }
 
-// ─── Container App — first service placeholder ─────────────────────────────────
-// Bootstrap skill replaces 'api' with the first service name from bootstrap-seed.json.
-// Add one resource block per additional service (copy this block, change the name).
-resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
-  name: '${projectName}-dev-api'
+// ── Azure Container Registry ──────────────────────────────────────────────────────────────────────────────
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  // ACR names must be alphanumeric — strip hyphens from project name
+  name:     replace('${envName}acr', '-', '')
   location: location
-  tags: tags
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: { '${identity.id}': {} }
-  }
+  tags:     tags
+  sku: { name: 'Basic' }
   properties: {
-    managedEnvironmentId: appsEnv.id
-    configuration: {
-      ingress: {
-        external: true
-        targetPort: 3000
-      }
-      registries: [
-        {
-          server: registry.properties.loginServer
-          identity: identity.id
-        }
-      ]
-    }
-    template: {
-      containers: [
-        {
-          name: 'api'
-          // Placeholder image — replaced on first deploy by CI/CD
-          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
-          resources: {
-            cpu: '0.25'
-            memory: '0.5Gi'
-          }
-          env: [
-            { name: 'NODE_ENV', value: 'development' }
-            { name: 'KEY_VAULT_URI', value: keyVault.properties.vaultUri }
-          ]
-        }
-      ]
-      scale: {
-        minReplicas: 0   // scale to zero when idle — dev cost saving
-        maxReplicas: 3
-      }
-    }
+    adminUserEnabled:    false
+    publicNetworkAccess: 'Enabled'
   }
 }
 
-// ─── Push Notification Hub (optional — push-notifications addon) ───────────────
-resource notifNamespace 'Microsoft.NotificationHubs/namespaces@2023-09-01' = if (enablePushNotifications) {
-  name: notifNamespaceName
+// Grant GitHub Actions service principal AcrPush on the registry
+var acrPushRoleId = '8311e382-0749-4cb8-b61a-304f252e45ec'
+resource acrPushAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(githubActionsClientId)) {
+  name:  guid(acr.id, githubActionsClientId, acrPushRoleId)
+  scope: acr
+  properties: {
+    roleDefinitionId:    subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPushRoleId)
+    principalId:         githubActionsClientId
+    principalType:       'ServicePrincipal'
+  }
+}
+
+// ── Key Vault ──────────────────────────────────────────────────────────────────────────────────────────────
+resource kv 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name:     '${projectName}-kv-dev'
   location: location
-  tags: tags
+  tags:     tags
+  properties: {
+    sku:                     { family: 'A', name: 'standard' }
+    tenantId:                subscription().tenantId
+    enableRbacAuthorization: true
+    enableSoftDelete:        true
+    softDeleteRetentionInDays: 7
+  }
+}
+
+// Grant GitHub Actions service principal Key Vault Secrets User
+var kvSecretsUserRoleId = '4633458b-17de-408a-b874-0445c86b69e6'
+resource kvSecretsUserAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(githubActionsClientId)) {
+  name:  guid(kv.id, githubActionsClientId, kvSecretsUserRoleId)
+  scope: kv
+  properties: {
+    roleDefinitionId:    subscriptionResourceId('Microsoft.Authorization/roleDefinitions', kvSecretsUserRoleId)
+    principalId:         githubActionsClientId
+    principalType:       'ServicePrincipal'
+  }
+}
+
+// ── Notification Hubs (push-notifications addon) ──────────────────────────────────────────────────
+resource anhNamespace 'Microsoft.NotificationHubs/namespaces@2023-10-01-preview' = {
+  name:     '${envName}-nh-ns'
+  location: location
+  tags:     tags
   sku: { name: 'Free' }
-}
-
-resource notifHub 'Microsoft.NotificationHubs/namespaces/notificationHubs@2023-09-01' = if (enablePushNotifications) {
-  name: '${notifNamespaceName}/default'
-  location: location
-  tags: tags
   properties: {}
-  dependsOn: [notifNamespace]
 }
 
-// ─── Outputs ───────────────────────────────────────────────────────────────────
-// Bootstrap skill stores these in infra/bootstrap.json after provisioning.
-output identityClientId string = identity.properties.clientId
-output keyVaultUri string = keyVault.properties.vaultUri
-output keyVaultName string = keyVault.name
-output registryLoginServer string = registry.properties.loginServer
-output containerAppFqdn string = containerApp.properties.configuration.ingress.fqdn
-output notifHubEnabled bool = enablePushNotifications
-output notifHubNamespace string = enablePushNotifications ? notifNamespaceName : ''
-output notifHubName string = enablePushNotifications ? 'default' : ''
+resource anh 'Microsoft.NotificationHubs/namespaces/notificationHubs@2023-10-01-preview' = {
+  parent:   anhNamespace
+  name:     'default'
+  location: location
+  tags:     tags
+  properties: {}
+}
+
+// ── Outputs ────────────────────────────────────────────────────────────────────────────────────────────────
+output keyVaultName           string = kv.name
+output registryLoginServer    string = acr.properties.loginServer
+output containerAppsEnvId    string = cae.id
+output notificationHubNamespace string = anhNamespace.name

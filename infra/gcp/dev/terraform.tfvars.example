@@ -1,18 +1,8 @@
 # infra/gcp/dev/terraform.tfvars.example
-# Bootstrap skill substitutes {{placeholders}} from bootstrap-seed.json,
-# then saves the result as terraform.tfvars (gitignored — no secrets here,
-# but we gitignore *.tfvars by convention to prevent accidental secret commits).
-#
-# To apply manually:
-#   cp terraform.tfvars.example terraform.tfvars   # then fill in values
-#   terraform init && terraform apply
+# Copy to terraform.tfvars and fill in values.
+# terraform.tfvars is gitignored — never commit it.
 
-project_id   = "{{subscription_id}}"
-project_name = "{{project_name}}"
+project_id   = "{{project_name}}-dev"  # your GCP project ID
 region       = "{{region}}"
+project_name = "{{project_name}}"
 github_org   = "{{github_org}}"
-
-# Addon flags — set to true for each addon declared in bootstrap-seed.json
-enable_push_notifications = {{addon_push_notifications}}
-enable_realtime           = {{addon_realtime}}
-enable_webhooks           = {{addon_webhooks}}
