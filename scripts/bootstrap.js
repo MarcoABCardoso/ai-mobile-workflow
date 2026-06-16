@@ -178,6 +178,9 @@ file('.gitignore', [
 
 console.log('\n── Copying templates ────────────────────────────────────────────\n')
 
+// Git hooks — stored in .git-hooks/ (tracked) and installed via `npm run prepare`
+template('templates/scaffold/pre-push', '.git-hooks/pre-push', {}, true)
+
 template('templates/CLAUDE.md.template', 'CLAUDE.md', SUBS)
 template('templates/ci.yml', '.github/workflows/ci.yml', {}, true)
 template('templates/preview.yml', '.github/workflows/preview.yml', {}, true)
@@ -236,7 +239,14 @@ file('package.json', json({
   private: true,
   packageManager: `npm@${NPM_VERSION}`,
   workspaces: ['mobile', 'services/*', 'shared/*'],
-  scripts: { dev: 'turbo run dev', build: 'turbo run build', test: 'turbo run test', lint: 'turbo run lint', generate: 'turbo run generate' },
+  scripts: {
+    dev:      'turbo run dev',
+    build:    'turbo run build',
+    test:     'turbo run test',
+    lint:     'turbo run lint',
+    generate: 'turbo run generate',
+    prepare:  'cp .git-hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push',
+  },
   devDependencies: { turbo: '^2.0.0', typescript: '^5.4.0' },
 }))
 
@@ -378,8 +388,9 @@ for (let i = 0; i < SVCS.length; i++) {
     },
     dependencies: svcDeps,
     devDependencies: {
-      '@types/node': '^20.0.0',
-      '@types/pg':   '^8.10.0',
+      '@types/js-yaml': '^4.0.0',
+      '@types/node':    '^22.0.0',
+      '@types/pg':      '^8.10.0',
       'drizzle-kit': '^0.20.0',
       tsx:           '^4.7.0',
       typescript:    '^5.4.0',
